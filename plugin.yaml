@@ -1,0 +1,79 @@
+manifest_version: 2
+name: hermes-phone
+version: "0.1.0"
+description: "Approved outbound phone calls with AI disclosure, live mid-call questions, and results."
+author: winchxyz
+kind: standalone
+license: MIT
+homepage: https://github.com/winchxyz/hermes-phone
+tags: [voice, phone, twilio, realtime]
+provides_tools: [phone_prepare, phone_call, phone_status, phone_transcript]
+provides_hooks: [pre_tool_call, pre_llm_call]
+python_dependencies:
+  - "twilio>=9,<10"
+  - "fastapi>=0.110,<1"
+  - "uvicorn[standard]>=0.29,<1"
+  - "websockets>=14,<16"
+  - "phonenumbers>=8.13,<10"
+  - "tzdata>=2024.1,<2027"
+  - "httpx>=0.27,<1"
+requires_env:
+  - name: TWILIO_ACCOUNT_SID
+    description: "Twilio account SID"
+    url: "https://console.twilio.com"
+    secret: true
+  - name: TWILIO_AUTH_TOKEN
+    description: "Twilio auth token"
+    url: "https://console.twilio.com"
+    secret: true
+  - name: TWILIO_FROM_NUMBER
+    description: "Your Twilio number in E.164"
+  - name: OPENAI_API_KEY
+    description: "OpenAI key for Realtime"
+    url: "https://platform.openai.com/api-keys"
+    secret: true
+  - name: PUBLIC_BASE_URL
+    description: "Public https URL of your ngrok/cloudflared tunnel to the bridge"
+# Developer-only env (deliberately not in requires_env; never set by the model):
+#   HERMES_PHONE_TEST_ALLOWLIST  comma-separated E.164 numbers that may be dialed.
+#                                Unset or empty means ALL dialing is refused.
+#   HERMES_PHONE_ALLOW_ALL=1     explicit developer opt-out of the allowlist.
+config_schema:
+  user_name:
+    type: string
+    description: "Name the agent says it calls on behalf of"
+  callback_number:
+    type: string
+    description: "Callback number the agent may give, E.164"
+  question_timeout_s:
+    type: integer
+    default: 75
+    description: "Seconds to wait for the user to answer a mid-call question (30 to 120)"
+  model:
+    type: string
+    default: "gpt-realtime-2.1"
+    description: "OpenAI Realtime model id for the voice session"
+  voice:
+    type: string
+    default: "marin"
+    description: "Realtime voice name"
+  max_duration_s:
+    type: integer
+    default: 300
+    description: "Default max call duration in seconds (hard cap 900)"
+  daily_call_limit:
+    type: integer
+    default: 10
+    description: "Maximum calls placed per rolling 24 hours"
+  store_transcripts:
+    type: boolean
+    default: true
+    description: "Keep call transcripts in plugin storage"
+  twilio_cost_per_min_usd:
+    type: number
+    default: 0.014
+    description: "Twilio outbound price per started minute, used only for the cost estimate in the result message"
+  realtime_cost_per_min_usd:
+    type: number
+    default: 0.15
+    description: "Assumed OpenAI Realtime audio cost per minute for the estimate (an estimate, not a bill)"

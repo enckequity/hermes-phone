@@ -1,0 +1,24 @@
+#!/command/with-contenv sh
+# shellcheck shell=sh
+# cont-init: runs as root after the image's 01-hermes-setup (volume ownership, config seeding).
+# Syncs the plugin from the image into the persistent data dir on EVERY boot (so a redeploy ships
+# plugin updates), creates the shared DB dir, and applies env -> config.yaml. No secrets are read
+# into config or printed.
+set -eu
+HERMES_HOME="${HERMES_HOME:-/opt/data}"
+PLUGIN_DIR="$HERMES_HOME/plugins/hermes-phone"
+DB_DIR="$(dirname "${HERMES_PHONE_DB:-$HERMES_HOME/plugin-data/hermes-phone/data.db}")"
+
+mkdir -p "$HERMES_HOME/plugins"
+rm -rf "$PLUGIN_DIR"
+mkdir -p "$PLUGIN_DIR"
+cp -a /opt/hermes-phone/. "$PLUGIN_DIR/"
+find "$PLUGIN_DIR" -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
+chown -R hermes:hermes "$HERMES_HOME/plugins"
+
+mkdir -p "$DB_DIR"
+chown hermes:hermes "$HERMES_HOME/plugin-data" "$DB_DIR" 2>/dev/null || true
+chown hermes:hermes "$DB_DIR"
+
+PYTHONPATH=/opt/hermes s6-setuidgid hermes /opt/hermes/.venv/bin/python /opt/hermes-phone-boot/boot-config.py
+echo "[hermes-phone] plugin synced to $PLUGIN_DIR; db dir $DB_DIR"

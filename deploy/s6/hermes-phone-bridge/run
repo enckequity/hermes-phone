@@ -1,0 +1,12 @@
+#!/command/with-contenv sh
+# shellcheck shell=sh
+# hermes-phone media bridge, supervised by s6 (auto-restarted if it exits), same pattern as the
+# image's own dashboard service. Binds 0.0.0.0:$PORT (Railway injects PORT) and shares the plugin
+# SQLite DB through HERMES_PHONE_DB. Missing Twilio/OpenAI vars do not stop it (healthz stays up).
+export HOME=/opt/data
+cd /opt/data
+export PYTHONPATH=/opt/hermes-phone
+export HERMES_PHONE_BRIDGE_HOST="${HERMES_PHONE_BRIDGE_HOST:-0.0.0.0}"
+mkdir -p "$(dirname "$HERMES_PHONE_DB")"
+[ "$(id -u)" = 0 ] || exec /opt/hermes/.venv/bin/python -m hermes_phone.bridge
+exec s6-setuidgid hermes /opt/hermes/.venv/bin/python -m hermes_phone.bridge

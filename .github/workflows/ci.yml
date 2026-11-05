@@ -1,0 +1,64 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+      - name: Ruff
+        run: ruff check .
+      - name: Unit tests (no network)
+        run: pytest -q -m "not e2e"
+  hermes-plugin-checks:
+    # Official Hermes checks, run only on GitHub's runner (never in the dev sandbox).
+    runs-on: ubuntu-latest
+    env:
+      HERMES_AGENT_SHA: ed1afb082eb3e46cf2edae9d8f68fb67b09ee4df
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+      - name: Install hermes-agent (pinned, from its uv.lock)
+        run: |
+          H="$RUNNER_TEMP/hermes-agent"
+          git init -q "$H"
+          git -C "$H" remote add origin https://github.com/NousResearch/hermes-agent
+          git -C "$H" fetch -q --depth 1 origin "$HERMES_AGENT_SHA"
+          git -C "$H" checkout -q FETCH_HEAD
+          # Hermes refuses wheel builds and pins deps only for Python 3.14 via uv.lock.
+          (cd "$H" && uv sync --frozen --python 3.14)
+          # Our plugin's own runtime deps into the same env, so the capability probe can import.
+          uv pip install --python "$H/.venv/bin/python" -e .
+          echo "$H/.venv/bin" >> "$GITHUB_PATH"
+          # Doctor stages the plugin under HERMES_HOME; it must live outside the plugin dir.
+          echo "HERMES_HOME=$RUNNER_TEMP/hermes-home" >> "$GITHUB_ENV"
+      - name: hermes --version
+        run: hermes --version
+      - name: hermes plugins validate
+        run: hermes plugins validate .
+      - name: hermes plugins doctor --ci
+        run: hermes plugins doctor . --ci
+  docker-build:
+    # Catches Dockerfile breakage before Railway does. Build only, no push.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: docker build
+        run: docker build -t hermes-phone:ci .
+      - name: Smoke - plugin deps import and boot config
+        run: |
+          docker run --rm --entrypoint /opt/hermes/.venv/bin/python \
+            -e PYTHONPATH=/opt/hermes-phone hermes-phone:ci \
+            -c "import hermes_phone.bridge.app, twilio, phonenumbers; print('imports ok')"

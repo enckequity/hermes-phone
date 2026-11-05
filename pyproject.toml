@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=68,<81"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-phone"
+version = "0.1.0"
+description = "Approved outbound phone calls with AI disclosure, live mid-call questions, and results (Hermes Agent plugin)."
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [{name = "winchxyz"}]
+dependencies = [
+  "twilio>=9,<10",
+  "fastapi>=0.110,<1",
+  "uvicorn[standard]>=0.29,<1",
+  "websockets>=14,<16",
+  "phonenumbers>=8.13,<10",
+  "tzdata>=2024.1,<2027",
+  "httpx>=0.27,<1",
+]
+
+[project.urls]
+Homepage = "https://github.com/winchxyz/hermes-phone"
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8,<9",
+  "pytest-asyncio>=0.23,<1",
+  "ruff>=0.5,<1",
+  "pyyaml>=6,<7",
+]
+
+[tool.setuptools]
+packages = ["hermes_phone", "hermes_phone.bridge"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--import-mode=importlib"
+markers = ["e2e: needs real API keys"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = [".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "W"]
+
+[tool.ruff.lint.per-file-ignores]
+"hermes_phone/bridge/webpage.py" = ["E501"]  # embedded HTML/JS/CSS
