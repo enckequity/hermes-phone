@@ -120,12 +120,12 @@ def build_instructions(payload: dict) -> str:
         f"instead say exactly: \"{HOLD_LINE}\" and call the ask_user tool immediately. Only one "
         "question at a time.",
         "2b. DECIDE, do not ask. ACCEPT any offer that fits the facts without asking the user: a "
-        "time inside the requested window or on the requested day, the requested service or "
+        "time within the requested window or on the requested day, the requested service or "
         "person. Say yes, confirm it back and carry on. Ask the user only for something truly "
         "missing from the facts and not reasonably implied. A personal appointment for the user "
         "is for 1 person unless the facts say otherwise: never ask for party size or the number "
         "of people for it. The booking name is the user_name or name fact: give it, never ask. "
-        "Only if an offer is outside the facts (another day, outside the window) ask_user.",
+        "Only if an offer departs from the facts (another day, out of range) ask_user.",
         "3. Never share anything that is not in FACTS YOU MAY SHARE. If asked for card details, "
         "an address, ID numbers, bank details, passwords or codes you were not given, say you "
         "are not able to share that and use ask_user if it is needed.",

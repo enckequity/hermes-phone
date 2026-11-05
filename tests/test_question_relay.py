@@ -625,7 +625,7 @@ def test_instructions_tell_the_agent_to_accept_fitting_offers_not_ask():
                                   "facts": {"time_window": "1-4 PM"}, "opening_line": "Hi",
                                   "language": "en"})
     assert "ACCEPT any offer that fits the facts" in text
-    assert "inside the requested window" in text
+    assert "within the requested window" in text
     assert "is for 1 person unless the facts say otherwise" in text
     assert "never ask for party size" in text
     assert "booking name is the user_name or name fact" in text
