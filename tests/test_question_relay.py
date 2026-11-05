@@ -343,7 +343,7 @@ def test_fillers_every_15s_never_the_answer_and_none_after_answer(qh, clock):
         clock.advance(16)
         wait_for(lambda: count(qh, rt.FILLER_LINE) == 1)
         filler = [e for e in qh.rt.of("response.create") if e.get("response", {}).get(
-            "instructions") == rt.FILLER_INSTRUCTIONS][0]
+            "instructions", "").endswith(rt.FILLER_INSTRUCTIONS)][0]
         assert filler["response"]["tool_choice"] == "none"
         assert "inside" not in filler["response"]["instructions"]
         clock.advance(15)

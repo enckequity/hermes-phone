@@ -85,8 +85,13 @@ def test_first_response_forces_ai_disclosure_after_greeting(harness, record):
     assert len(responses(harness)) == 1
     first = responses(harness)[0]["response"]["instructions"]
     assert "an AI assistant calling on behalf of" in first and line in first
-    assert "goal" not in first.lower() and "brief" not in first.lower()
-    assert ("may be recorded" in first) is record
+    step = first.split("CURRENT STEP")[-1]
+    assert "goal" not in step.lower() and "brief" not in step.lower()
+    # Per-response instructions replace the session ones in Realtime: the opening must carry
+    # the call context, or the agent says "I don't have the details yet" (live bug, Nov 5).
+    assert "WHAT YOU ARE CALLING FOR: Book a table for 4" in first
+    assert "FACTS YOU MAY SHARE" in first and '"party_size": 4' in first
+    assert ("may be recorded" in step) is record
     sess = harness.rt.sent[0]["session"]
     assert "You are an AI" in sess["instructions"]
     assert sess["audio"]["input"]["turn_detection"]["create_response"] is False

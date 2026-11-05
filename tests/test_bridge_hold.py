@@ -83,7 +83,7 @@ def test_callee_speaking_during_hold_gets_one_short_line_not_an_auto_reply(qh):
         qh.rt.push({"type": "input_audio_buffer.speech_stopped"})
         wait_for(lambda: count(qh, rt.HOLD_REPLY_LINE) == 1)
         hold = [e for e in qh.rt.of("response.create") if e.get("response", {}).get(
-            "instructions") == rt.HOLD_REPLY_INSTRUCTIONS][0]
+            "instructions", "").endswith(rt.HOLD_REPLY_INSTRUCTIONS)][0]
         assert hold["response"]["tool_choice"] == "none"
         low = rt.HOLD_REPLY_INSTRUCTIONS.lower()
         assert "do not explain" in low and "keep them on the line" in low

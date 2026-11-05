@@ -184,14 +184,21 @@ class CallSession:
                                  {"code": str(err.get("code", ""))[:80],
                                   "message": str(err.get("message", ""))[:200]})
 
+    def _ctx(self, step: str) -> str:
+        """Per-response instructions REPLACE the session instructions in OpenAI Realtime, so
+        every override carries the full call context (who, what for, facts, rules) plus the step.
+        Without this the opening said "I don't have the details yet" (live call, Nov 5)."""
+        return rt.build_instructions(self.payload) + "\n\nCURRENT STEP (do this now):\n" + step
+
     async def _send_opening(self) -> None:
         """Forced opening (AI disclosure first), once: after the greeting or a silent timeout."""
         if self._opening_sent:
             return
         self._opening_sent = True
         self._opening_sent_at = self.clock()
+        step = rt.opening_response_instructions(self.payload["opening_line"])
         await self._rt_send({"type": "response.create", "response": {
-            "instructions": rt.opening_response_instructions(self.payload["opening_line"])}})
+            "instructions": self._ctx(step)}})
         # VAD stays unable to answer or interrupt until this response is done (_opening_finished):
         # a second "Hey." must not cut the disclosure off and restart it.
 
@@ -291,7 +298,7 @@ class CallSession:
         self._last_hold_at = self.clock()
         self.store.add_event(self.call_id, "hold_reply", {"question_id": self._question_id})
         await self._rt_send({"type": "response.create", "response": {
-            "instructions": rt.HOLD_REPLY_INSTRUCTIONS, "tool_choice": "none"}})
+            "instructions": self._ctx(rt.HOLD_REPLY_INSTRUCTIONS), "tool_choice": "none"}})
 
     async def _answer_fn(self, fn_call_id: str, output: dict, instructions: str = "",
                          *, end_hold: bool = True) -> None:
@@ -306,7 +313,7 @@ class CallSession:
             "output": json.dumps(output)}})
         event: dict = {"type": "response.create"}
         if instructions:
-            event["response"] = {"instructions": instructions}
+            event["response"] = {"instructions": self._ctx(instructions)}
         await self._rt_send(event)
 
     def _set_state(self, new: str) -> None:
@@ -387,7 +394,7 @@ class CallSession:
                     self._last_hold_at = now
                     self.store.add_event(self.call_id, "hold_filler", {"question_id": qid})
                     await self._rt_send({"type": "response.create", "response": {
-                        "instructions": rt.FILLER_INSTRUCTIONS, "tool_choice": "none"}})
+                        "instructions": self._ctx(rt.FILLER_INSTRUCTIONS), "tool_choice": "none"}})
                 await asyncio.sleep(self.settings.question_poll_s)
         except asyncio.CancelledError:
             raise
@@ -477,7 +484,7 @@ class CallSession:
                 self.wrapup_sent = True
                 self.store.add_event(self.call_id, "wrapup", {"elapsed_s": int(elapsed)})
                 await self._rt_send({"type": "response.create", "response": {
-                    "instructions": rt.WRAPUP_INSTRUCTIONS}})
+                    "instructions": self._ctx(rt.WRAPUP_INSTRUCTIONS)}})
             if self.end_requested_at is not None:
                 idle = not self.response_active and not self.marks
                 if idle or now - self.end_requested_at >= self.settings.end_grace_s:
@@ -491,7 +498,7 @@ class CallSession:
         elif twilio_io.machine_message_done(answered_by) and not self.wrapup_sent:
             self.wrapup_sent = True
             await self._rt_send({"type": "response.create", "response": {
-                "instructions": rt.VOICEMAIL_INSTRUCTIONS}})
+                "instructions": self._ctx(rt.VOICEMAIL_INSTRUCTIONS)}})
 
     async def _finish(self, final: str, reason: str, outcome: str, summary: str = "",
                       *, rest: bool = True, apology: bool = False) -> None:
