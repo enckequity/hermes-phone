@@ -8,7 +8,7 @@ license: MIT
 homepage: https://github.com/winchxyz/hermes-phone
 tags: [voice, phone, twilio, realtime]
 provides_tools: [phone_prepare, phone_call, phone_status, phone_transcript]
-provides_hooks: [pre_tool_call, pre_llm_call]
+provides_hooks: [pre_tool_call, pre_llm_call, transform_llm_output]
 python_dependencies:
   - "twilio>=9,<10"
   - "fastapi>=0.110,<1"

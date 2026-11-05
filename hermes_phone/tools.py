@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -67,6 +68,7 @@ class PhoneService:
         self.watchers: dict[str, Any] = {}  # call_id -> relay.CallWatcher
         self.answer_links: dict[str, str] = {}  # web mode: call_id -> link to post (in memory)
         self.watch_poll_s: float = 0.5
+        self.ack_sessions: dict[str, float] = {}  # session id -> when a card was posted for it
 
     @property
     def environ(self) -> Mapping[str, str]:
@@ -319,14 +321,15 @@ def _phone_prepare(args: Any, kwargs: Mapping[str, Any], retry_of: str = "") -> 
             posted = getattr(handle, "ok", True) is not False
         except Exception:  # noqa: BLE001
             posted = False
+    if posted:
+        svc.ack_sessions[_session_id(kwargs)] = time.monotonic()
     return _json(
         call_id=call_id, state=states.AWAITING_APPROVAL, brief=brief, card=card,
         replaced_cards=superseded,
         card_posted=posted, approve_hint=f"/phone approve {call_id}",
         instructions=(
-            ("The approval card is ALREADY shown to the user. Do not repeat or summarise the "
-             "brief. Reply with one short line only, e.g. 'Check the card above and reply "
-             f"\"call\" to place it (or /phone approve {call_id}).' Do not offer extras. ")
+            ("The approval card is ALREADY shown to the user. Reply with ONLY the single "
+             "character \U0001F446 and nothing else: no words, no summary, no offers. ")
             if posted else
             ("Show the user the card text above verbatim, then tell them to reply \"call\" "
              f"(or send /phone approve {call_id}). ")

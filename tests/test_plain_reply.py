@@ -52,7 +52,7 @@ def test_affirmative_sends_the_suggestion_the_user_saw(svc, store, clock):
 
 def test_affirmative_without_suggestion_is_not_an_answer(svc, store, clock):
     cid = live_call(store, clock)
-    question(store, cid)
+    question(store, cid, field="seating")
     assert "What should I tell them" in blocked(hook("yes"))
     assert store.get_question("q1")["status"] == "open"
 
@@ -123,7 +123,7 @@ def prepared(session="S1", **prep):
 def test_call_reply_approves_and_dials_exactly_once(svc, store, clock):
     cid = prepared()
     msg = blocked(hook("Call"))
-    assert "Dialing Bella Napoli" in msg and cid in msg
+    assert msg == commands.APPROVED_ACK
     call = store.get_call(cid)
     assert call["state"] == states.DIALING and len(svc.dialer.calls) == 1
     assert hook("call") is None  # nothing waiting any more: goes to the model
@@ -134,7 +134,7 @@ def test_each_approval_word_works(svc, store, clock):
     for i, word in enumerate(["yes", "go", "approve", "да", "звони", "позвони"]):
         clock.advance(120)
         cid = prepared(session=f"S{i}")
-        assert "Dialing" in blocked(hook(word, session=f"S{i}"))
+        assert blocked(hook(word, session=f"S{i}")) == commands.APPROVED_ACK
         store.update_call(cid, state=states.COMPLETED)
 
 

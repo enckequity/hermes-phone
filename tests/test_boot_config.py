@@ -90,3 +90,18 @@ def test_gemini_replaces_auto_provider_and_foreign_default(tmp_path, monkeypatch
     cfg = yaml.safe_load((home / "config.yaml").read_text())
     assert cfg["model"]["provider"] == "gemini"
     assert cfg["model"]["default"].startswith("gemini")
+
+
+def test_quiet_agent_turns_off_the_profile_build_offer(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_PHONE_QUIET_AGENT", "1")
+    assert _load().main() == 0
+    cfg = yaml.safe_load((tmp_path / "config.yaml").read_text())
+    assert cfg["onboarding"]["profile_build"] == "off"
+
+
+def test_profile_offer_untouched_without_quiet_agent(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.delenv("HERMES_PHONE_QUIET_AGENT", raising=False)
+    assert _load().main() == 0
+    assert "onboarding" not in yaml.safe_load((tmp_path / "config.yaml").read_text())

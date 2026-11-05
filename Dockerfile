@@ -29,6 +29,7 @@ RUN chmod 0755 /etc/s6-overlay/s6-rc.d/hermes-phone-bridge/run \
     && touch /etc/s6-overlay/s6-rc.d/user/contents.d/hermes-phone-bridge
 
 # Both processes use this one SQLite file (plugin and bridge share state only through it).
+ENV HERMES_PHONE_QUIET_AGENT=1
 ENV HERMES_PHONE_DB=/opt/data/plugin-data/hermes-phone/data.db
 
 # Image idiom: CMD "gateway run" starts the s6-supervised gateway (auto-restart) and keeps the

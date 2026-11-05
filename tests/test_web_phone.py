@@ -138,7 +138,7 @@ def drain(ws):
 def test_approve_in_web_mode_dials_nobody_and_posts_the_link(web, ctx):
     cid = prepare()["call_id"]
     out = commands.phone_command(f"approve {cid} confirm", user_id="u1", session_id="s1")
-    assert "Ringing in your browser" in out and "Dialing" not in out
+    assert out == ""  # the live status message is the only reply
     call = web.store.get_call(cid)
     assert call["state"] == states.DIALING and call["provider_sid"] == f"web-{cid}"
     path, token = link_of(web, cid)

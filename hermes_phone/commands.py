@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Any
 
 from . import brief as briefmod
@@ -56,7 +57,7 @@ def _cmd_approve(rest: list[str], kwargs: dict) -> str:
     if call["state"] == states.APPROVED:
         # Approved earlier but never dialed (the model did not follow up): the user is asking
         # again, so dial now. phone_call re-checks the approval (unexpired, unused) itself.
-        return _dial_now(call_id, call, kwargs)
+        return _dial_now(call_id, call, kwargs, silent=True)
     if call["state"] != states.AWAITING_APPROVAL:
         return f"Call {call_id} is {call['state']}; only a call awaiting approval can be approved."
     refused = recheck_dialable(call)
@@ -80,7 +81,7 @@ def _cmd_approve(rest: list[str], kwargs: dict) -> str:
     # The user's explicit tap on Call (or `confirm`) IS the go-ahead: dial right here instead
     # of depending on the model to call phone_call afterwards. phone_call still re-checks the
     # approval, blocklist, allowlist, quiet hours and rate limits (defense in depth).
-    return _dial_now(call_id, call, kwargs)
+    return _dial_now(call_id, call, kwargs, silent=True)
 
 
 def recheck_dialable(call: dict) -> str:
@@ -110,7 +111,7 @@ def approve_by_reply(call_id: str, kwargs: dict) -> str:
     if refused:
         return refused
     record_user_approval(call_id, kwargs)
-    return _dial_now(call_id, call, kwargs)
+    return _dial_now(call_id, call, kwargs, ack=APPROVED_ACK)
 
 
 def cancel_by_reply(call_id: str) -> str:
@@ -126,11 +127,32 @@ def record_user_approval(call_id: str, kwargs: dict) -> None:
                       user_id=user, session_id=session)
 
 
-def _dial_now(call_id: str, call: dict, kwargs: dict) -> str:
+APPROVED_ACK = "\U0001F44D"
+STATUS_WAIT_S = 3.0
+
+
+def _status_posted(call_id: str) -> bool:
+    """True once the watcher has posted (or can no longer post) the one live status message."""
+    watcher = tools.get_service().watchers.get(call_id)
+    deadline = time.monotonic() + STATUS_WAIT_S
+    while watcher is not None and time.monotonic() < deadline:
+        if getattr(watcher, "_status_handle", None) is not None:
+            return True
+        time.sleep(0.05)
+    return watcher is not None and getattr(watcher, "_status_handle", None) is not None
+
+
+def _dial_now(call_id: str, call: dict, kwargs: dict, *, silent: bool = False,
+              ack: str = "") -> str:
+    """Dial. When the watcher's live status message is out, that is the only message: a slash
+    handler then replies with nothing (Hermes sends no reply for an empty result), and a plain
+    reply (whose block message must be non-empty) with ``ack``."""
     data = json.loads(tools.phone_call({"call_id": call_id}, **kwargs))
     if "error" in data:
         return (f"Approved call {call_id}, but dialing failed: {data['error']}\n"
                 f"Details: /phone status {call_id}")
+    if (silent or ack) and _status_posted(call_id):
+        return ack
     if tools.get_service().mode == "web":
         return (f"Approved. Ringing in your browser for {call['callee_name']}, call {call_id}: "
                 "open the link I just posted and tap Answer. The call is placed to no phone; "

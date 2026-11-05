@@ -17,7 +17,7 @@ import hermes_phone
 from hermes_phone import tools
 
 ROOT = Path(__file__).resolve().parent.parent
-VALID_HOOKS = {"pre_tool_call", "pre_llm_call"}  # subset used here; both are real Hermes hooks
+VALID_HOOKS = {"pre_tool_call", "pre_llm_call", "transform_llm_output"}
 
 
 @pytest.fixture
@@ -161,7 +161,7 @@ def test_loads_like_hermes_by_path(tmp_path, monkeypatch):
         spec.loader.exec_module(module)
         ctx = FakeCtx()
         module.register(ctx)
-        assert len(ctx.tools) == 4 and len(ctx.hooks) == 2 and "phone" in ctx.commands
+        assert len(ctx.tools) == 4 and len(ctx.hooks) == 3 and "phone" in ctx.commands
         assert ctx.skills and ctx.skills[0]["path"].exists()
         # the tools registered through this load work end to end
         out = ctx.tools["phone_status"]["handler"]({})

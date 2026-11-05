@@ -325,7 +325,7 @@ def test_approve_via_ask_choice_call(svc, ctx):
     cid = prepare()["call_id"]
     ctx.choices = ["Call"]
     out = commands.phone_command(f"approve {cid}", user_id="u9", session_id="sx")
-    assert out.startswith("Approved") and ctx.asked[0][1] == ["Call", "Edit", "Cancel"]
+    assert out == "" and ctx.asked[0][1] == ["Call", "Edit", "Cancel"]
     assert svc.store.get_approval(cid)["user_id"] == "u9"
 
 
@@ -344,7 +344,7 @@ def test_approve_requires_confirm_without_buttons(svc, ctx):
     out = commands.phone_command(f"approve {cid}")
     assert f"/phone approve {cid} confirm" in out
     assert svc.store.get_approval(cid) is None
-    assert commands.phone_command(f"approve {cid} confirm").startswith("Approved")
+    assert commands.phone_command(f"approve {cid} confirm") == ""
 
 
 def test_approve_without_ask_choice_attribute(svc):
@@ -357,7 +357,7 @@ def test_cannot_approve_twice_or_unknown(svc):
     cid = prepare()["call_id"]
     approve(svc, cid)
     # Re-approving an approved-but-undialed call dials it once; after that it cannot repeat.
-    assert commands.phone_command(f"approve {cid} confirm").startswith("Approved. Dialing")
+    assert commands.phone_command(f"approve {cid} confirm") == ""
     assert "only a call awaiting approval" in commands.phone_command(f"approve {cid} confirm")
     assert "Unknown" in commands.phone_command("approve nope confirm")
 
@@ -392,11 +392,21 @@ def test_commands_usage_and_unknowns(svc):
 def test_prepare_tells_agent_not_to_repeat_posted_card(svc):
     out = prepare()
     assert out["card_posted"] is True
-    assert "Do not repeat" in out["instructions"]
-    assert f"/phone approve {out['call_id']}" in out["instructions"]
+    assert "ONLY the single character" in out["instructions"]
+    assert "\U0001F446" in out["instructions"]
 
 
 def test_quiet_hours_off_by_default(svc, clock):
     clock.advance(-10 * 3600)  # 05:00 New York
     out = prepare()
     assert "error" not in out, out
+
+
+def test_card_turn_reply_is_rewritten_to_the_pointer_once(svc):
+    from hermes_phone import hooks
+    out = prepare(session_id="S9")
+    assert out["card_posted"] is True
+    pointer = hooks.transform_llm_output(response_text="Check the card...", session_id="S9")
+    assert pointer == "\U0001F446"
+    assert hooks.transform_llm_output(response_text="later reply", session_id="S9") is None
+    assert hooks.transform_llm_output(response_text="x", session_id="other") is None

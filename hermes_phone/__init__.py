@@ -24,6 +24,7 @@ def register(ctx: Any) -> None:
                           handler=handler, description=tools.SCHEMAS[name]["description"])
     ctx.register_hook("pre_tool_call", hooks.pre_tool_call)
     ctx.register_hook("pre_llm_call", hooks.pre_llm_call)
+    ctx.register_hook("transform_llm_output", hooks.transform_llm_output)
     ctx.register_command("phone", commands.phone_command,
                          description="Approve, cancel or inspect phone calls",
                          args_hint="approve <id> | cancel <id> | status [id] | transcript <id> "

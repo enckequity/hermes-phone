@@ -9,6 +9,7 @@ Merges into $HERMES_HOME/config.yaml (Hermes' own format, via hermes_yaml):
     config.yaml or HERMES_INFERENCE_PROVIDER, model.provider=gemini and model.default=
     HERMES_PHONE_LLM_MODEL or gemini-3.8-flash. HERMES_PHONE_LLM_MODEL overrides model.default for
     any provider (e.g. an OpenRouter ":free" id). HERMES_PHONE_FREE_ONLY=1 sets auxiliary.free_only.
+  * HERMES_PHONE_QUIET_AGENT=1 sets onboarding.profile_build: "off" (no profile-build offers)
 Never touches auth.json or .env, and never prints values.
 """
 from __future__ import annotations
@@ -102,6 +103,12 @@ def main() -> int:
     if (os.environ.get("HERMES_PHONE_FREE_ONLY") or "").strip().lower() in ("1", "true", "yes"):
         _dict(config, "auxiliary")["free_only"] = True
         applied.append("auxiliary.free_only")
+
+    if (os.environ.get("HERMES_PHONE_QUIET_AGENT") or "").strip().lower() in ("1", "true", "yes"):
+        # Hermes' own "build a short profile of you?" first-message offer: stop it
+        # (agent/onboarding.py profile_build_mode; docs configuration.md "Onboarding").
+        _dict(config, "onboarding")["profile_build"] = "off"
+        applied.append("onboarding.profile_build=off")
 
     home.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".yaml.tmp")

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from . import reply, results, states, tools
@@ -38,6 +39,24 @@ def pre_tool_call(tool_name: str = "", args: Any = None, task_id: str = "", **kw
 
 def _block(message: str) -> dict:
     return {"action": "block", "message": f"hermes-phone: {message}"}
+
+
+ACK = "\U0001F446"
+ACK_WINDOW_S = 180.0
+
+
+def transform_llm_output(response_text: str = "", session_id: str = "", **kwargs: Any
+                         ) -> str | None:
+    """The turn that posted an approval card ends with just a pointer to it. Hermes runs this once
+    per turn on the final reply (agent/turn_finalizer.py, first non-empty string wins)."""
+    try:
+        acks = tools.get_service().ack_sessions
+        posted = acks.pop(str(session_id or ""), None)
+        if posted is not None and time.monotonic() - posted < ACK_WINDOW_S:
+            return ACK
+    except Exception:  # noqa: BLE001
+        log.exception("hermes-phone transform_llm_output failed")
+    return None
 
 
 def pre_llm_call(**kwargs: Any) -> dict | None:

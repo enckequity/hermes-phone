@@ -255,3 +255,33 @@ matches (`origin_session_id`), so one conversation cannot answer or approve for 
 `pre_tool_call` veto and `check_approval` are unchanged: a model-issued `phone_call` is still
 refused without the recorded approval. Anything not matching exactly falls through to the model
 unchanged.
+
+## Chat noise, buttons and the quiet agent (verified against Hermes source)
+
+- **One reply per card.** `phone_prepare` tells the model to answer with only the pointer
+  character, and the plugin enforces it: a `transform_llm_output` hook rewrites the final reply of
+  the turn that posted a card to that pointer (`agent/turn_finalizer.py:542`, the first non-empty
+  string returned by a hook wins; hook name listed at `hermes_cli/plugins.py:111`). Hermes has no
+  per-tool "end the turn" flag, so the rewrite is the supported way.
+- **Approve reply merged into the live status.** When the watcher's editable status message is
+  out, `/phone approve` replies with an empty string (Hermes sends no reply for a falsy handler
+  result, `gateway/run_inbound_hooks.py:301`). A plain "call" reply must give a non-empty block
+  message (`agent/conversation_loop.py:1615`), so it gets a thumbs-up. Status then edits in place:
+  dialing, ringing, connected, on hold, finished.
+- **Question cards are retried.** A card whose post fails (the gateway may be busy or the session
+  not bound yet) is retried about once a second for the whole question window instead of three
+  times in 1.5 s, and a question that closed before any card made it out gets one closing message.
+  Memory lookups for suggestions have a 1.5 s budget so they cannot delay a card.
+- **No buttons for question cards (design decision).** `ctx.ask_choice` uses an asker bound by
+  `bind_asker` only "around the handler call" of a slash command
+  (`hermes_cli/plugin_choices.py:5-20`, `gateway/plugin_command_choice.py:chat_choices`). The
+  watcher thread does inherit the ContextVar through `contextvars.copy_context`, but after the
+  handler returned the asker is outside its documented lifetime, it blocks the watcher thread for
+  the clarify timeout (stalling status and other cards), and a pending clarify intercepts the
+  user's next typed message, which would fight the plain-text reply path. Plain "call" approvals
+  run in a hook, where no asker is bound at all. So question answers stay plain replies.
+- **Quiet agent.** Hermes' "offer to build a short profile" is the first-message directive in
+  `agent/onboarding.py:178-189`, controlled by `onboarding.profile_build` (`"ask"` default,
+  `"off"` stops it: `agent/onboarding.py:119-125`, docs `website/docs/user-guide/configuration.md`
+  "Onboarding"). `deploy/boot-config.py` sets it to `off` when `HERMES_PHONE_QUIET_AGENT=1`
+  (default in the Docker image; set it to `0` to keep the offer).
