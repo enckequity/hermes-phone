@@ -136,7 +136,7 @@ Roughly 0.014 USD per minute for Twilio US outbound plus an assumed 0.15 USD per
 ## Legal notes (not legal advice)
 
 - **AI disclosure** opens every call. Some jurisdictions require it; it is the honest default anyway.
-- **Recording consent.** Some places require all-party consent. Recording is off by default, opt-in per call, and announced on the call. Transcripts are text kept in plugin storage (disable with `store_transcripts: false`).
+- **Recording consent.** Some places require all-party consent. hermes-phone does not record call audio. It keeps text transcripts in plugin storage (disable with `store_transcripts: false`). If a brief sets `record: true`, the opening line adds "This call may be recorded."; actual audio recording is not implemented in v0.1.
 - **US TCPA / FCC.** The FCC treats AI-generated voices in calls as "artificial voice". This plugin only makes user-initiated, one-off calls to businesses you chose; it is not built for bulk, marketing or unsolicited calls, and the rate limits are there to keep it that way.
 - No emergency numbers, no premium numbers, no auto-redial. You are responsible for how you use it.
 
