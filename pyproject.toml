@@ -23,14 +23,6 @@ dependencies = [
 [project.urls]
 Homepage = "https://github.com/winchxyz/hermes-phone"
 
-[project.optional-dependencies]
-dev = [
-  "pytest>=8,<9",
-  "pytest-asyncio>=0.23,<1",
-  "ruff>=0.5,<1",
-  "pyyaml>=6,<7",
-]
-
 [tool.setuptools]
 packages = ["hermes_phone", "hermes_phone.bridge"]
 
@@ -39,6 +31,7 @@ testpaths = ["tests"]
 addopts = "--import-mode=importlib"
 markers = ["e2e: needs real API keys"]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 
 [tool.ruff]
 line-length = 100

@@ -17,7 +17,7 @@ jobs:
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e '.[dev]'
+          python -m pip install -e . -r requirements-dev.txt
       - name: Ruff
         run: ruff check .
       - name: Unit tests (no network)
@@ -39,15 +39,14 @@ jobs:
           git -C "$H" checkout -q FETCH_HEAD
           # Hermes refuses wheel builds and pins deps only for Python 3.14 via uv.lock.
           (cd "$H" && uv sync --frozen --python 3.14)
-          # Our plugin's own runtime deps into the same env, so the capability probe can import.
-          uv pip install --python "$H/.venv/bin/python" -e .
+          # Plugin deps are installed by `hermes plugins validate --install-deps` below.
           echo "$H/.venv/bin" >> "$GITHUB_PATH"
           # Doctor stages the plugin under HERMES_HOME; it must live outside the plugin dir.
           echo "HERMES_HOME=$RUNNER_TEMP/hermes-home" >> "$GITHUB_ENV"
       - name: hermes --version
         run: hermes --version
       - name: hermes plugins validate
-        run: hermes plugins validate .
+        run: hermes plugins validate . --install-deps
       - name: hermes plugins doctor --ci
         run: hermes plugins doctor . --ci
   docker-build:

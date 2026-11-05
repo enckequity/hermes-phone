@@ -4,7 +4,7 @@
 
 [![ci](https://github.com/winchxyz/hermes-phone/actions/workflows/ci.yml/badge.svg)](https://github.com/winchxyz/hermes-phone/actions/workflows/ci.yml)
 
-**hermes-phone lets your Hermes agent make the phone calls you keep putting off.** Say "book a table" or "ask the clinic if they have a slot Friday", check the brief, tap Call. The agent introduces itself as an AI, handles the conversation, and when the other side asks something it doesn't know, it puts them on a polite hold and asks you in chat, with a suggested answer ready. You get the result, the confirmation number and the transcript. No call without your approval, no surprise sharing of card or address, no auto-redials, emergency numbers blocked.
+**hermes-phone lets your Hermes agent make the phone calls you keep putting off.** Say "book a table" or "ask the clinic if they have a slot Friday", check the brief, tap Call. The agent introduces itself as an AI, handles the conversation, and when the other side asks something it doesn't know, it puts them on a polite hold and asks you in chat, with a suggested answer ready. You get the result, the confirmation number and the transcript. No call without your approval, no surprise sharing: card, address and ID only with per-call consent (CVV, passwords and one-time codes never), no auto-redials, emergency numbers blocked.
 
 Twilio Media Streams + OpenAI Realtime, native Hermes hooks, slash commands and live messages. Works from Telegram, Discord, Slack or the CLI.
 
@@ -46,7 +46,7 @@ Text version: you ask, the agent prepares a card, you approve, the bridge dials 
 - **AI disclosure is the first sentence of every call**, and the agent always answers yes to "am I talking to a robot?".
 - **Emergency and premium blocklist, not configurable.** 911, 112, 999, 000, 110, 119, 100-103, 1-900, 1-976 and anything under 6 national digits are refused at prepare and at dial.
 - **Dev allowlist, fail-closed.** Only numbers in `HERMES_PHONE_TEST_ALLOWLIST` can be dialed; unset or empty means all dialing is refused. The model cannot change it.
-- **Sensitive-field consent.** Card, address, ID, bank, email and phone values are withheld from the voice model unless you grant that field for that call. CVV, passwords and OTP codes are never shared, with or without consent.
+- **Sensitive-field consent.** Card, address, ID, bank, email and phone values are withheld from the voice model unless you grant that field for that call. CVV, passwords and OTP codes are never shared, with or without consent. (In short: card, address and ID only with per-call consent; CVV, passwords and one-time codes never.)
 - **Rate limits.** 1 active call, a daily limit (default 10), 60 s between calls to the same number, hard duration cap of 900 s (default 300).
 - **Quiet hours (opt-in).** With `HERMES_PHONE_QUIET_HOURS=on` (or `enforce_quiet_hours: true`), calls outside 08:00 to 21:00 callee local time are refused unless you explicitly override. Off by default, since dialing is already limited to your allowlist and every call needs your approval.
 - **No auto-redial.** No answer, busy or voicemail are reported plainly; `/phone retry <id>` creates a new call that needs a fresh approval.
@@ -85,6 +85,7 @@ The `Dockerfile` builds `nousresearch/hermes-agent` plus this plugin and runs th
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_USERS` | yes | Bot token and numeric Telegram user ids (unset denies everyone) |
 | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER` | Twilio mode | Credentials and caller id (E.164) |
 | `HERMES_PHONE_MODE` | optional | `web` or `twilio` |
+| `HERMES_PHONE_TRUST_PROXY` | optional | `1` = rate-limit web-phone routes on `X-Forwarded-For` (only behind a proxy that sets it; the Railway Dockerfile sets it). Default: the socket peer address |
 | `HERMES_PHONE_USER_NAME`, `HERMES_PHONE_CALLBACK_NUMBER` | recommended / optional | Who the agent calls for; callback number it may give |
 | `HERMES_PHONE_QUESTION_TIMEOUT_S`, `_MAX_DURATION_S`, `_DAILY_CALL_LIMIT`, `_VOICE`, `_MODEL` | optional | Other plugin settings |
 

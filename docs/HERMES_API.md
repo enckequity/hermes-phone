@@ -525,6 +525,24 @@ Choice dict keys: `value` (required), `label`, `description` (`plugin_choices.py
   ```
 
   Also `get_secret_str(name, default="")` at `agent/secret_scope.py:272`.
+- **Behaviour (verified in source).** `get_secret` (`agent/secret_scope.py:230-261`): names in the global allowlist read
+  `os.environ` (`:240-241`); with a bound scope it returns the scope's value, and on a miss falls through to
+  `os.environ` unless the task serves a routed profile (`:242-247`); with no scope and multiplexing INACTIVE it reads
+  `os.environ` (`:261`, via `_environ_or` `:225-227`); with no scope and multiplexing ACTIVE it raises
+  `UnscopedSecretError` (`:248-260`, class at `:126`). So the separate bridge process (`python -m hermes_phone.bridge`,
+  never multiplexed, no scope) gets plain `os.environ` even if `agent.secret_scope` imports in the Hermes venv.
+- **hermes-phone's route**: `hermes_phone/secrets.py` `get(name, environ=None)`: injected mapping (tests) wins; else
+  `agent.secret_scope.get_secret`; `ImportError` (no Hermes) falls back to `os.environ`; any error from `get_secret`
+  (incl. `UnscopedSecretError`) is treated as missing, never `os.environ` (fail closed). `secrets.Environ` is the
+  `PhoneService.environ` view: only `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER`, `OPENAI_API_KEY`,
+  `PUBLIC_BASE_URL` go through it; `HERMES_PHONE_*`, `PORT` and the DB path stay on `os.environ`. The dialer is
+  re-resolved per access and the Twilio client is keyed on (sid, token), so a profile switch never reuses another
+  profile's credentials. A test greps `hermes_phone/` for bare `os.environ` reads of these names.
+- **Plugin deps**: `hermes plugins validate --install-deps` runs `pm.sync_venv(plugins=Candidates([path]))`
+  (`hermes_cli/plugins_cmd_catalog.py:880-897`), resolving the plugin's deps against Hermes' lock. Lock pins:
+  fastapi 0.133.1, httpx 0.28.1, tzdata 2025.3, uvicorn 0.54.0, websockets 15.0.1, pytest 9.1.1, pytest-asyncio 1.4.0
+  (`uv.lock`); twilio and phonenumbers are not in the lock (added by the sync). Our ranges overlap all of them, and
+  test deps live in `requirements-dev.txt` (no `dev` extra).
 - Non-secret settings: `ctx.get_config(key, default)` (`plugins.py:266`). Secret `config_schema` fields live in `.env`.
 
 ---

@@ -39,7 +39,9 @@ class TwilioDialer:
     def __init__(self, environ: Mapping[str, str], *, client: Any = None,
                  http_get: Callable[[str, float], int] | None = None) -> None:
         self.environ = environ
-        self._client = client
+        self._client = None
+        self._client_key: tuple[str, str] = ("", "")
+        self._injected_client = client
         self._http_get = http_get or _http_status
 
     @property
@@ -47,11 +49,15 @@ class TwilioDialer:
         return (self.environ.get("PUBLIC_BASE_URL") or "").strip().rstrip("/")
 
     def client(self) -> Any:
-        if self._client is None:
+        if self._injected_client is not None:
+            return self._injected_client
+        sid = self.environ.get("TWILIO_ACCOUNT_SID") or ""
+        token = self.environ.get("TWILIO_AUTH_TOKEN") or ""
+        if self._client is None or self._client_key != (sid, token):  # profile-scoped secrets
             from twilio.rest import Client  # lazy
 
-            self._client = Client(self.environ["TWILIO_ACCOUNT_SID"],
-                                  self.environ["TWILIO_AUTH_TOKEN"])
+            self._client = Client(sid, token)
+            self._client_key = (sid, token)
         return self._client
 
     def preflight(self) -> str:
@@ -82,7 +88,7 @@ class TwilioDialer:
         cid = call["id"]
         max_s = int(call["brief"]["limits"]["max_duration_s"])
         status_url = f"{self.base_url}/status/{cid}"
-        base = dict(to=number, from_=self.environ["TWILIO_FROM_NUMBER"],
+        base = dict(to=number, from_=self.environ.get("TWILIO_FROM_NUMBER") or "",
                     url=f"{self.base_url}/twiml/{cid}", method="POST",
                     status_callback=status_url, status_callback_method="POST")
         # Trial accounts reject some parameters ("Invalid or disallowed parameters ... trial

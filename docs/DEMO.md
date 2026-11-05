@@ -25,6 +25,6 @@ Recording tips: disable notifications, lower Twilio latency by running the bridg
 
 ## README pitch (top of README.md)
 
-> **hermes-phone** lets your Hermes agent make the phone calls you keep putting off. Say "book a table" or "ask the clinic if they have a slot Friday", check the brief, tap Call. The agent introduces itself as an AI, handles the conversation, and when the other side asks something it doesn't know, it puts them on a polite hold and asks you in chat, with a suggested answer ready. You get the result, the confirmation number and the transcript. No call without your approval, no surprise sharing of card or address, no auto-redials, emergency numbers blocked.
+> **hermes-phone** lets your Hermes agent make the phone calls you keep putting off. Say "book a table" or "ask the clinic if they have a slot Friday", check the brief, tap Call. The agent introduces itself as an AI, handles the conversation, and when the other side asks something it doesn't know, it puts them on a polite hold and asks you in chat, with a suggested answer ready. You get the result, the confirmation number and the transcript. No call without your approval, no surprise sharing: card, address and ID only with per-call consent (CVV, passwords and one-time codes never), no auto-redials, emergency numbers blocked.
 >
 > Twilio Media Streams + OpenAI Realtime, native Hermes hooks, slash commands and live messages. Works from Telegram, Discord, Slack or the CLI.

@@ -7,7 +7,6 @@ do not need Hermes, a network, or the wall clock.
 from __future__ import annotations
 
 import json
-import os
 import threading
 import time
 import uuid
@@ -18,6 +17,7 @@ from typing import Any, Protocol
 
 from . import brief as briefmod
 from . import consent, results, safety, states
+from . import secrets as secretsmod
 from .store import Store
 
 MAX_TEXT = 2000
@@ -62,6 +62,8 @@ class PhoneService:
         self._store = store
         self._store_factory = store_factory or Store
         self._dialer = dialer  # None: resolved lazily from env (Twilio if configured)
+        self._dialer_auto = False
+        self._dialer_kind = ""
         self._environ = environ
         self._now = now
         self._lock = threading.Lock()
@@ -72,21 +74,33 @@ class PhoneService:
 
     @property
     def environ(self) -> Mapping[str, str]:
-        return os.environ if self._environ is None else self._environ
+        return secretsmod.Environ() if self._environ is None else self._environ
 
     @property
     def dialer(self) -> Dialer:
-        if self._dialer is None:
-            from . import dialer as dialermod
-            from . import mode as modemod
+        if self._dialer is not None and not self._dialer_auto:
+            return self._dialer  # injected (tests)
+        from . import dialer as dialermod
+        from . import mode as modemod
 
-            chosen = modemod.resolve(self.environ)
-            if chosen.missing:
+        # Re-resolved on every access: secrets are profile-scoped, so the answer can differ per
+        # turn. Dialers read secrets at use time; only the matching kind is reused (web links).
+        chosen = modemod.resolve(self.environ)
+        if chosen.missing:
+            kind = "null"
+        elif chosen.name == modemod.WEB:
+            kind = "web"
+        else:
+            kind = "twilio"
+        if self._dialer is None or self._dialer_kind != kind or kind == "null":
+            if kind == "null":
                 self._dialer = NullDialer(configured=False, missing=chosen.missing)
-            elif chosen.name == modemod.WEB:
+            elif kind == "web":
                 self._dialer = dialermod.WebPhoneDialer(self.environ, store=self.store)
             else:
                 self._dialer = dialermod.TwilioDialer(self.environ)
+            self._dialer_kind = kind
+            self._dialer_auto = True
         return self._dialer
 
     @property
@@ -99,6 +113,7 @@ class PhoneService:
     @dialer.setter
     def dialer(self, value: Dialer) -> None:
         self._dialer = value
+        self._dialer_auto = False
 
     @property
     def store(self) -> Store:

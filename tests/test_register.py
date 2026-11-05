@@ -128,8 +128,9 @@ def test_all_dependencies_upper_bounded(manifest):
 
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
     deps = (list(manifest["python_dependencies"]) + pyproject["dependencies"]
-            + [d for group in pyproject["optional-dependencies"].values() for d in group])
+            + [d for group in pyproject.get("optional-dependencies", {}).values() for d in group])
     assert deps
+    assert "optional-dependencies" not in pyproject, "no extras: they must resolve in Hermes' lock"
     for dep in deps:
         assert re.search(r"<\s*\d|==|~=", dep), f"no upper bound: {dep}"
     assert sorted(manifest["python_dependencies"]) == sorted(pyproject["dependencies"])

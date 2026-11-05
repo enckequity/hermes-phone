@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from .. import mode as modemod
+from .. import secrets as secretsmod
 
 DEFAULT_MODEL = "gpt-realtime-2.1"
 DEFAULT_VOICE = "marin"
@@ -41,7 +42,8 @@ class BridgeSettings:
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> BridgeSettings:
-        env = os.environ if environ is None else environ
+        env = os.environ if environ is None else environ  # non-secret config only
+        secret = lambda name: secretsmod.get(name, environ)  # noqa: E731  profile-scoped route
         bind_all = bool(env.get("PORT")) and not env.get("HERMES_PHONE_BRIDGE_HOST")
         port_raw = env.get("HERMES_PHONE_BRIDGE_PORT") or env.get("PORT") or str(DEFAULT_PORT)
         try:
@@ -49,11 +51,11 @@ class BridgeSettings:
         except ValueError:
             port = DEFAULT_PORT
         return cls(
-            public_base_url=(env.get("PUBLIC_BASE_URL") or "").strip().rstrip("/"),
-            twilio_account_sid=env.get("TWILIO_ACCOUNT_SID", ""),
-            twilio_auth_token=env.get("TWILIO_AUTH_TOKEN", ""),
-            twilio_from_number=env.get("TWILIO_FROM_NUMBER", ""),
-            openai_api_key=env.get("OPENAI_API_KEY", ""),
+            public_base_url=secret("PUBLIC_BASE_URL").strip().rstrip("/"),
+            twilio_account_sid=secret("TWILIO_ACCOUNT_SID"),
+            twilio_auth_token=secret("TWILIO_AUTH_TOKEN"),
+            twilio_from_number=secret("TWILIO_FROM_NUMBER"),
+            openai_api_key=secret("OPENAI_API_KEY"),
             model=env.get("HERMES_PHONE_MODEL") or DEFAULT_MODEL,
             voice=env.get("HERMES_PHONE_VOICE") or DEFAULT_VOICE,
             db_path=env.get("HERMES_PHONE_DB_PATH") or env.get("HERMES_PHONE_DB") or "",
@@ -61,7 +63,7 @@ class BridgeSettings:
             port=port,
             store_transcripts=(env.get("HERMES_PHONE_STORE_TRANSCRIPTS", "1").strip().lower()
                                not in ("0", "false", "no", "off")),
-            environ=dict(env),
+            environ={**env, **{n: secret(n) for n in secretsmod.SECRET_NAMES}},
         )
 
     def missing_env(self) -> list[str]:

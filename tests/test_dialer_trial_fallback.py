@@ -25,9 +25,8 @@ def _dialer(reject):
     env = {"TWILIO_ACCOUNT_SID": "AC" + "1" * 32, "TWILIO_AUTH_TOKEN": "t",
            "TWILIO_FROM_NUMBER": "+12125550100", "PUBLIC_BASE_URL": "https://h.example",
            "HERMES_PHONE_TEST_ALLOWLIST": "+12125550123"}
-    d = dialer_mod.TwilioDialer(environ=env)
     calls = _Calls(reject)
-    d._client = type("Cl", (), {"calls": calls})()
+    d = dialer_mod.TwilioDialer(environ=env, client=type("Cl", (), {"calls": calls})())
     return d, calls
 
 

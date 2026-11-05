@@ -30,6 +30,8 @@ RUN chmod 0755 /etc/s6-overlay/s6-rc.d/hermes-phone-bridge/run \
 
 # Both processes use this one SQLite file (plugin and bridge share state only through it).
 ENV HERMES_PHONE_QUIET_AGENT=1
+# Railway's edge proxy sets X-Forwarded-For; trust it for web-phone rate limiting.
+ENV HERMES_PHONE_TRUST_PROXY=1
 ENV HERMES_PHONE_DB=/opt/data/plugin-data/hermes-phone/data.db
 
 # Image idiom: CMD "gateway run" starts the s6-supervised gateway (auto-restart) and keeps the

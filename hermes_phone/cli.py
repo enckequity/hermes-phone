@@ -6,6 +6,8 @@ import os
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from . import secrets as secretsmod
+
 
 def setup(parser: argparse.ArgumentParser) -> None:
     sub = parser.add_subparsers(dest="phone_cmd")
@@ -87,7 +89,7 @@ def run_checks(environ: Mapping[str, str], http_get: Callable[[str, float], int]
 
 
 def doctor() -> int:
-    results = run_checks(os.environ)
+    results = run_checks(secretsmod.Environ())
     for name, ok, detail in results:
         print(f"[{'ok' if ok else 'FAIL'}] {name}: {detail}")
     return 0 if all(ok for _, ok, _ in results) else 1

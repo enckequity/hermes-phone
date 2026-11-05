@@ -1,0 +1,6 @@
+# Test/dev tools (CI and local). Not a package extra: pins match Hermes' shared lock.
+pytest>=9.1,<10
+pytest-asyncio>=1.4,<2
+ruff>=0.5,<1
+pyyaml>=6,<7
+httpx>=0.27,<1

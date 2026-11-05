@@ -42,9 +42,14 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
               clock: Callable[[], float], refusal: Callable[[str], str]) -> None:
     hits: dict[str, deque[float]] = {}
 
+    def trust_proxy() -> bool:
+        return (settings.environ.get("HERMES_PHONE_TRUST_PROXY") or "").strip() == "1"
+
     def limited(request: Request) -> bool:
-        fwd = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
-        key = fwd or (request.client.host if request.client else "?")
+        key = request.client.host if request.client else "?"
+        if trust_proxy():  # only behind a proxy that sets/overwrites X-Forwarded-For (Railway)
+            fwd = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+            key = fwd or key
         now = clock()
         q = hits.setdefault(key, deque())
         while q and now - q[0] > RATE_WINDOW_S:
