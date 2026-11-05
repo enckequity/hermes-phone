@@ -84,11 +84,10 @@ def _approval(svc: Any, session_id: str, word: str, sender: str, platform: str) 
             waiting.append(call)
     if not waiting:
         return None
-    if len(waiting) > 1:
-        ids = ", ".join(c["id"] for c in waiting)
-        return (f"More than one call is waiting ({ids}). Use /phone approve <id> or "
-                "/phone cancel <id>.")
-    call = waiting[0]
+    if word in CANCEL_WORDS and len(waiting) > 1:
+        for older in waiting[:-1]:
+            commands.cancel_by_reply(older["id"])
+    call = waiting[-1]  # the newest card is the one the user is looking at
     kwargs = {"user_id": sender or platform or "local", "session_id": session_id,
               "platform": platform}
     if word in APPROVE_WORDS:

@@ -285,6 +285,15 @@ def _phone_prepare(args: Any, kwargs: Mapping[str, Any], retry_of: str = "") -> 
     call_id = "c" + uuid.uuid4().hex[:8]
     stored = dict(brief, facts_raw=facts, sensitive_requested=requested)
     store = svc.store
+    # One pending card per chat: a new request replaces older unapproved cards instead of
+    # making the user cancel them one by one (live feedback: stale cards blocked new requests).
+    superseded = []
+    for row in store.awaiting_for_session(_session_id(kwargs)):
+        try:
+            states.transition(store, row["id"], states.CANCELED, reason="superseded")
+            superseded.append(row["id"])
+        except Exception:  # noqa: BLE001 - a racing approval/expiry wins; nothing to replace
+            pass
     store.create_call(call_id, state=states.DRAFT, callee_name=callee, number=e164,
                       number_source=source, goal=goal, brief=stored,
                       session_id=_session_id(kwargs), retry_of=retry_of)
@@ -301,6 +310,7 @@ def _phone_prepare(args: Any, kwargs: Mapping[str, Any], retry_of: str = "") -> 
             posted = False
     return _json(
         call_id=call_id, state=states.AWAITING_APPROVAL, brief=brief, card=card,
+        replaced_cards=superseded,
         card_posted=posted, approve_hint=f"/phone approve {call_id}",
         instructions=(
             ("The approval card is ALREADY shown to the user. Do not repeat or summarise the "

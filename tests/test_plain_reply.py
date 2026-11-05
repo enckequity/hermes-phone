@@ -167,11 +167,24 @@ def test_expired_card_is_not_approved(svc, store, clock):
     assert store.get_call(cid)["state"] == states.EXPIRED and not svc.dialer.calls
 
 
-def test_two_waiting_cards_need_the_explicit_command(svc, store, clock):
-    prepared()
+def test_new_card_replaces_old_and_call_dials_the_newest(svc, store, clock):
+    first = prepared()
     clock.advance(120)
-    prepared()
-    assert "More than one call" in blocked(hook("call"))
+    second = prepared()
+    assert store.get_call(first)["state"] == states.CANCELED  # superseded, no manual cancel
+    assert store.get_call(first)["reason"] == "superseded"
+    blocked(hook("call"))
+    assert len(svc.dialer.calls) == 1 and svc.dialer.calls[0]["call_id"] == second
+
+
+def test_cancel_reply_clears_every_waiting_card(svc, store, clock):
+    a = prepared()
+    clock.advance(120)
+    b = prepared()
+    store.update_call(a, state=states.AWAITING_APPROVAL)  # simulate a legacy duplicate
+    blocked(hook("cancel"))
+    assert store.get_call(a)["state"] == states.CANCELED
+    assert store.get_call(b)["state"] == states.CANCELED
     assert not svc.dialer.calls
 
 
