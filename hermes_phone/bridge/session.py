@@ -64,6 +64,9 @@ class CallSession:
         # lifecycle
         self.wrapup_sent = False
         self.end_requested_at: float | None = None
+        self._end_pending = False      # end_call received; decide on response.done
+        self._end_pending_at = 0.0
+        self._goodbye_said = False     # agent thanked / said goodbye since the callee last spoke
         self.hung_up = False
         self.finish_reason = ""
         self._inbox: deque[tuple[str, str]] = deque()  # thread-safe hand-off from HTTP handlers
@@ -164,6 +167,8 @@ class CallSession:
                 await self._opening_finished()
             if self._closing_resp and rid == self._closing_resp:
                 self._closing_done = True
+            if self._end_pending:
+                await self._finish_politely()
         elif etype == "response.output_audio.delta":
             await self._on_audio_delta(ev)
         elif etype == "response.output_audio_transcript.done":
@@ -438,6 +443,18 @@ class CallSession:
         except Exception:  # noqa: BLE001
             log.exception("could not close open questions")
 
+    async def _finish_politely(self) -> None:
+        """end_call arrived: never hang up in silence. If the agent did not thank the callee and
+        say goodbye, make it say one short closing line first, then hang up after it played."""
+        self._end_pending = False
+        if self._goodbye_said:
+            if self.end_requested_at is None:
+                self.end_requested_at = self.clock()
+            return
+        self._closing_since = self.clock()  # before sending: its response events may race us
+        await self._rt_send({"type": "response.create", "response": {
+            "instructions": self._ctx(rt.GOODBYE_INSTRUCTIONS), "tool_choice": "none"}})
+
     def _tool_end_call(self, args: dict) -> dict:
         outcome = str(args.get("outcome") or "")
         if outcome not in rt.END_OUTCOMES:
@@ -447,8 +464,9 @@ class CallSession:
                   "next_steps": str(args.get("next_steps") or "")[:1000],
                   "duration_s": int(self.clock() - self.started_at)}
         self.store.set_result_once(self.call_id, result, outcome)
-        if self.end_requested_at is None:
-            self.end_requested_at = self.clock()
+        if self.end_requested_at is None and self._closing_since is None:
+            self._end_pending = True  # hang up after this response, with a goodbye guaranteed
+            self._end_pending_at = self.clock()
         return {"status": "ok"}
 
     # ---- lifecycle -----------------------------------------------------------------------
@@ -462,6 +480,8 @@ class CallSession:
                 await self._opening_finished()  # response.done never arrived: do not stay deaf
             if not self._opening_sent and elapsed >= self.settings.opening_wait_s:
                 await self._send_opening()  # nobody said hello: speak first
+            if self._end_pending and now - self._end_pending_at >= self.settings.end_grace_s:
+                await self._finish_politely()  # response.done never came: still close politely
             while self._inbox:
                 kind, value = self._inbox.popleft()
                 if kind == "voicemail":
@@ -561,6 +581,10 @@ class CallSession:
     # ---- plumbing ------------------------------------------------------------------------
     def _line(self, role: str, text: str) -> None:
         text = (text or "").strip()
+        if text and role == "agent" and rt.is_goodbye(text):
+            self._goodbye_said = True
+        elif text and role == "callee":
+            self._goodbye_said = False
         if text and role == "agent" and not self._disclosure_checked:
             self._disclosure_checked = True  # first agent line only; independent of storage
             try:

@@ -12,6 +12,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from hermes_phone import states
 from hermes_phone.bridge import create_app
+from hermes_phone.bridge import realtime as rt
 
 CARD = "4111 1111 1111 1111"
 ADDRESS = "221B Baker Street"
@@ -232,11 +233,14 @@ def test_end_call_stores_result_and_hangs_up(harness):
         wait_for(lambda: harness.rt.of("session.update"))
         harness.rt.push({"type": "input_audio_buffer.speech_stopped"})
         wait_for(lambda: responses(harness))
+        harness.rt.push({"type": "response.output_audio_transcript.done",
+                         "transcript": "Perfect, thank you so much. Goodbye!"})
         harness.rt.push({"type": "response.function_call_arguments.done", "name": "end_call",
                          "call_id": "f9", "arguments": json.dumps({
                              "outcome": "success",
                              "agreed": {"date": "Friday", "time": "20:00", "party_size": 4},
                              "next_steps": "none"})})
+        harness.rt.push({"type": "response.done", "response": {"id": "rEnd"}})
         wait_for(lambda: harness.tw.updates)
         drain(ws)
     assert harness.tw.updates[-1] == {"sid": "CA" + "1" * 32, "status": "completed"}
@@ -258,8 +262,11 @@ def test_end_call_waits_for_marks_then_grace(harness, clock):
                          "delta": OUTBOUND})
         ws.receive_text()
         mark = json.loads(ws.receive_text())
+        harness.rt.push({"type": "response.output_audio_transcript.done",
+                         "transcript": "Thanks so much, goodbye!"})
         harness.rt.push({"type": "response.function_call_arguments.done", "name": "end_call",
                          "call_id": "f9", "arguments": json.dumps({"outcome": "partial"})})
+        harness.rt.push({"type": "response.done", "response": {"id": "rEnd"}})
         wait_for(lambda: harness.rt.of("conversation.item.create"))
         assert harness.tw.updates == []  # goodbye audio not yet played
         clock.advance(harness.settings.end_grace_s + 1)  # lost mark: grace expires
@@ -280,6 +287,8 @@ def test_end_call_in_same_response_as_goodbye_waits_for_its_marks(harness):
                          "delta": OUTBOUND})
         ws.receive_text()
         mark = json.loads(ws.receive_text())
+        harness.rt.push({"type": "response.output_audio_transcript.done",
+                         "transcript": "Thanks so much, goodbye!"})
         harness.rt.push({"type": "response.function_call_arguments.done", "name": "end_call",
                          "call_id": "f9", "arguments": json.dumps({"outcome": "success"})})
         harness.rt.push({"type": "response.done", "response": {"id": "r1"}})
@@ -403,3 +412,28 @@ def test_callee_hangs_up_mid_call_finalises_once(harness):
         wait_for(lambda: harness.store.get_call(cid)["state"] == states.COMPLETED)
     assert harness.tw.updates == []  # already hung up by the callee
     assert harness.store.get_call(cid)["reason"] == "callee_hung_up"
+
+
+def test_end_call_without_goodbye_forces_a_closing_line_then_hangs_up(harness):
+    cid = harness.dialing_call()
+    token, cm = open_call(harness, cid)
+    with cm as ws:
+        start(harness, ws, cid, token)
+        wait_for(lambda: harness.rt.of("session.update"))
+        harness.rt.push({"type": "input_audio_buffer.speech_stopped"})
+        wait_for(lambda: responses(harness))
+        harness.rt.push({"type": "response.output_audio_transcript.done",
+                         "transcript": "Great, 3 pm it is."})
+        harness.rt.push({"type": "response.function_call_arguments.done", "name": "end_call",
+                         "call_id": "f9", "arguments": json.dumps({"outcome": "success"})})
+        harness.rt.push({"type": "response.done", "response": {"id": "rEnd"}})
+        wait_for(lambda: any(r.get("response", {}).get("instructions", "").endswith(
+            rt.GOODBYE_INSTRUCTIONS) for r in harness.rt.of("response.create")))
+        assert not harness.tw.updates  # no hangup before the goodbye played
+        harness.rt.push({"type": "response.created", "response": {"id": "rBye"}})
+        harness.rt.push({"type": "response.output_audio_transcript.done",
+                         "transcript": "Thank you so much, goodbye!"})
+        harness.rt.push({"type": "response.done", "response": {"id": "rBye"}})
+        wait_for(lambda: harness.tw.updates)
+        drain(ws)
+    assert harness.store.get_call(cid)["state"] == states.COMPLETED

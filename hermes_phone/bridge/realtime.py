@@ -14,6 +14,15 @@ REALTIME_URL = "wss://api.openai.com/v1/realtime"
 AUDIO_FORMAT = {"type": "audio/pcmu"}  # G.711 mu-law 8 kHz: identical to Twilio, no transcoding
 TRANSCRIPTION_MODEL = "gpt-4o-mini-transcribe"
 HOLD_LINE = "One moment please, let me check."
+GOODBYE_LINE = "Thank you so much for your help. Have a great day, goodbye!"
+_GOODBYE_WORDS = ("goodbye", "good bye", "bye", "thank you", "thanks", "have a great day",
+                  "have a nice day", "спасибо", "до свидания")
+
+
+def is_goodbye(text: str) -> bool:
+    low = (text or "").lower()
+    return any(w in low for w in _GOODBYE_WORDS)
+
 FILLER_LINE = "Thanks for waiting, still checking."
 FILLER_LINE_2 = "Still checking, one moment."
 HOLD_REPLY_LINE = "One moment please, still checking."
@@ -166,6 +175,10 @@ def opening_response_instructions(opening_line: str) -> str:
             "from, and do not greet again or repeat the introduction. Then stop and wait for "
             "the reply.")
 
+
+GOODBYE_INSTRUCTIONS = ("The call is finished. Thank the callee warmly and say goodbye in one "
+                        f"short sentence, for example: \"{GOODBYE_LINE}\" Say nothing else and "
+                        "do not call any tool.")
 
 FILLER_INSTRUCTIONS = ("You are still waiting for the answer to your question. Say exactly one of "
                        f"these two lines and nothing else: \"{FILLER_LINE}\" or "

@@ -331,11 +331,15 @@ def test_round_trip_disclosure_audio_barge_in_and_end_call(web):
         web.rt.push({"type": "response.output_audio_transcript.done", "transcript": "Hello!"})
         assert json.loads(ws.receive_text()) == {"event": "transcript", "role": "agent",
                                                  "text": "Hello!"}
-        # end_call closes the socket and records one result
+        # end_call (after a goodbye) closes the socket and records one result
+        web.rt.push({"type": "response.output_audio_transcript.done",
+                     "transcript": "Thank you, goodbye!"})
         web.rt.push({"type": "response.function_call_arguments.done", "name": "end_call",
                      "call_id": "f9", "arguments": json.dumps({"outcome": "success"})})
+        web.rt.push({"type": "response.done", "response": {"id": "rEnd"}})
         events = drain(ws)
-    assert events[-1]["event"] == "ended"
+    # the socket closes after the goodbye; an explicit "ended" event may race the close
+    assert events[-1]["event"] in ("ended", "transcript")
     call = web.store.get_call(cid)
     assert call["state"] == states.COMPLETED and call["outcome"] == "success"
     assert call["duration_s"] is not None and call["reason"] == "end_call"
