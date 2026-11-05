@@ -1,5 +1,7 @@
 # hermes-phone
 
+![Hermes Phone](docs/assets/banner.png)
+
 [![ci](https://github.com/winchxyz/hermes-phone/actions/workflows/ci.yml/badge.svg)](https://github.com/winchxyz/hermes-phone/actions/workflows/ci.yml)
 
 **hermes-phone lets your Hermes agent make the phone calls you keep putting off.** Say "book a table" or "ask the clinic if they have a slot Friday", check the brief, tap Call. The agent introduces itself as an AI, handles the conversation, and when the other side asks something it doesn't know, it puts them on a polite hold and asks you in chat, with a suggested answer ready. You get the result, the confirmation number and the transcript. No call without your approval, no surprise sharing of card or address, no auto-redials, emergency numbers blocked.
