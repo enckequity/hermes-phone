@@ -151,7 +151,7 @@ def format_card(brief: dict, call_id: str) -> str:
     )
     if brief["quiet_hours_override"]:
         lines.append("Quiet hours override: yes")
-    lines.append(f"Approve with /phone approve {call_id} (Call / Edit / Cancel). "
+    lines.append(f'Reply "call" to place it, "cancel" to drop it (or /phone approve {call_id}). '
                  "Nothing is dialed until you approve.")
     return "\n".join(lines)
 

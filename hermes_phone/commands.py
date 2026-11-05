@@ -59,13 +59,9 @@ def _cmd_approve(rest: list[str], kwargs: dict) -> str:
         return _dial_now(call_id, call, kwargs)
     if call["state"] != states.AWAITING_APPROVAL:
         return f"Call {call_id} is {call['state']}; only a call awaiting approval can be approved."
-    # Re-check hard safety at approval time so the user never approves an undialable call.
-    e164, reason = safety.validate_number(call["number"])
-    if e164 is None or e164 != call["number"]:
-        return f"Cannot approve: {reason}"
-    allow = safety.check_allowlist(call["number"], svc.environ)
-    if not allow.ok:
-        return f"Cannot approve: {allow.reason}"
+    refused = recheck_dialable(call)
+    if refused:
+        return refused
 
     if not confirm:
         choice = _ask(svc, f"Place call {call_id} to {call['callee_name']} ({call['number']})?")
@@ -85,6 +81,40 @@ def _cmd_approve(rest: list[str], kwargs: dict) -> str:
     # of depending on the model to call phone_call afterwards. phone_call still re-checks the
     # approval, blocklist, allowlist, quiet hours and rate limits (defense in depth).
     return _dial_now(call_id, call, kwargs)
+
+
+def recheck_dialable(call: dict) -> str:
+    """Hard safety re-check at approval time so the user never approves an undialable call.
+
+    Returns a refusal message, or "" when the number may be approved."""
+    svc = tools.get_service()
+    e164, reason = safety.validate_number(call["number"])
+    if e164 is None or e164 != call["number"]:
+        return f"Cannot approve: {reason}"
+    allow = safety.check_allowlist(call["number"], svc.environ)
+    if not allow.ok:
+        return f"Cannot approve: {allow.reason}"
+    return ""
+
+
+def approve_by_reply(call_id: str, kwargs: dict) -> str:
+    """Approve and dial the one card waiting in this chat, from the user's plain reply.
+
+    Same checks as ``/phone approve <id> confirm``; only the hook calls it, and only with text
+    the human typed (see docs/ARCHITECTURE.md, safety)."""
+    store = tools.get_service().store
+    call = states.expire_if_stale(store, call_id)
+    if call is None or call["state"] != states.AWAITING_APPROVAL:
+        return f"Call {call_id} is no longer waiting for approval."
+    refused = recheck_dialable(call)
+    if refused:
+        return refused
+    record_user_approval(call_id, kwargs)
+    return _dial_now(call_id, call, kwargs)
+
+
+def cancel_by_reply(call_id: str) -> str:
+    return _cmd_cancel([call_id], {})
 
 
 def record_user_approval(call_id: str, kwargs: dict) -> None:

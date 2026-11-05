@@ -105,13 +105,13 @@ def test_approval_one_use_and_ttl(store, clock):
 def test_migrations_and_wal(tmp_path):
     path = tmp_path / "m.db"
     s = Store(path=path)
-    assert s.schema_version() == 5
+    assert s.schema_version() == 6
     assert s.conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
     tables = {r[0] for r in s.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"calls", "approvals", "consents", "questions", "events", "transcripts"} <= tables
     s.close()
     s2 = Store(path=path)  # reopen: idempotent migration, second process may open by path
-    assert s2.schema_version() == 5
+    assert s2.schema_version() == 6
     s2.close()
 
 

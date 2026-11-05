@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 PLUGIN_NAME = "hermes-phone"
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 DB_ENV = "HERMES_PHONE_DB"
 
 _SCHEMA_V1 = """
@@ -129,8 +129,14 @@ ALTER TABLE calls ADD COLUMN disclosure_spoken INTEGER;
 CREATE INDEX IF NOT EXISTS idx_calls_retry ON calls(retry_of);
 """
 
+_SCHEMA_V6 = """
+ALTER TABLE calls ADD COLUMN origin_session_id TEXT;
+ALTER TABLE questions ADD COLUMN card_suggestion TEXT;
+CREATE INDEX IF NOT EXISTS idx_calls_origin ON calls(origin_session_id, state);
+"""
+
 _MIGRATIONS: dict[int, str] = {1: _SCHEMA_V1, 2: _SCHEMA_V2, 3: _SCHEMA_V3, 4: _SCHEMA_V4,
-                               5: _SCHEMA_V5}
+                               5: _SCHEMA_V5, 6: _SCHEMA_V6}
 
 # Columns callers may update through update_call.
 _CALL_COLUMNS = {
@@ -138,6 +144,9 @@ _CALL_COLUMNS = {
     "result_json", "result_delivered", "user_id", "session_id", "duration_s",
     "hangup_requested_at", "result_posted_at",
 }
+
+
+LIVE_STATES = ("dialing", "ringing", "in_progress", "on_hold_for_user", "voicemail")
 
 
 def default_db_path() -> Path:
@@ -225,9 +234,11 @@ class Store:
         now = self.clock()
         self._exec(
             "INSERT INTO calls(id,state,callee_name,number,number_source,goal,brief_json,"
-            "user_id,session_id,created_at,updated_at,retry_of) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            "user_id,session_id,created_at,updated_at,retry_of,origin_session_id) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (call_id, state, callee_name, number, number_source, goal,
-             json.dumps(brief), user_id, session_id, now, now, retry_of or None),
+             json.dumps(brief), user_id, session_id, now, now, retry_of or None,
+             session_id or None),
         )
 
     def get_call(self, call_id: str) -> dict | None:
@@ -442,8 +453,27 @@ class Store:
                 return "late"
         return None
 
-    def mark_card_posted(self, qid: str) -> None:
-        self._exec("UPDATE questions SET card_posted=1 WHERE id=?", (qid,))
+    def mark_card_posted(self, qid: str, suggestion: str = "") -> None:
+        """Card is out; keep the suggestion the user saw (a plain "yes" sends exactly it)."""
+        self._exec("UPDATE questions SET card_posted=1, card_suggestion=? WHERE id=?",
+                   (suggestion or None, qid))
+
+    def open_questions_for_session(self, session_id: str) -> list[dict]:
+        """Open questions of live calls that were started by this session (never another's)."""
+        if not session_id:
+            return []
+        marks = ",".join("?" for _ in LIVE_STATES)
+        return self._all(
+            "SELECT q.* FROM questions q JOIN calls c ON c.id=q.call_id WHERE q.status='open' "
+            f"AND c.origin_session_id=? AND c.state IN ({marks}) ORDER BY q.created_at, q.rowid",
+            (session_id, *LIVE_STATES))
+
+    def awaiting_for_session(self, session_id: str) -> list[dict]:
+        """Calls this session prepared that still wait for approval (oldest first)."""
+        if not session_id:
+            return []
+        return self._all("SELECT id FROM calls WHERE origin_session_id=? AND "
+                         "state='awaiting_approval' ORDER BY created_at, rowid", (session_id,))
 
     def request_hangup(self, call_id: str) -> None:
         self._exec("UPDATE calls SET hangup_requested_at=COALESCE(hangup_requested_at, ?), "

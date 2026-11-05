@@ -47,7 +47,7 @@ def count(h, text):
 
 
 def cards(ctx):
-    return [m for m in ctx.messages if "They ask" in m.text]
+    return [m for m in ctx.messages if " asks" in m.text]
 
 
 def question_id(h):
@@ -108,11 +108,9 @@ def test_question_card_within_3s_suggestion_and_answer_resumes_within_2s(harness
         text = cards(ctx)[0].text
         qid = question_id(harness)
         assert "Suggested:" in text and "Winch" in text and "Bob" not in text
-        assert "from the call brief" in text and "not sent" in text
-        assert "untrusted" in text
-        for how in (f"/phone answer {qid} <text>", f"/phone answer {qid}",
-                    f"/phone answer {qid} decline"):
-            assert how in text
+        assert "Suggested: Winch" in text and 'reply "yes" to send it' in text
+        assert 'asks: "What name is the booking under?"' in text and "untrusted" not in text
+        assert 'Reply "decline"' in text and f"/phone answer {qid} <text>" in text
         assert harness.store.get_call(harness.cid)["state"] == states.ON_HOLD_FOR_USER
         assert outputs(harness) == []  # the function call stays pending
 
@@ -136,7 +134,7 @@ def test_status_message_is_one_edited_message(harness, ctx):
     status = mine[0]
     assert status.text.startswith(f"Call {harness.cid} to Bella Napoli: dialing")
     assert any("connected" in e for e in status.edits)
-    wait_for(lambda: any("ended" in e for e in status.edits))
+    wait_for(lambda: any("finished" in e for e in status.edits))
 
 
 def test_suggestion_from_plugin_settings_memory_then_model_guess(qh, ctx):
@@ -144,7 +142,7 @@ def test_suggestion_from_plugin_settings_memory_then_model_guess(qh, ctx):
     with live(qh, facts_to_share={"party_size": 4}):
         ask(qh, "Whose name should I put down?", field="reservation_name")
         wait_for(lambda: cards(ctx))
-        assert "Winch Settings" in cards(ctx)[0].text and "your profile" in cards(ctx)[0].text
+        assert "Winch Settings" in cards(ctx)[0].text
         qid = question_id(qh)
         commands.phone_command(f"answer {qid} decline")
         wait_for(lambda: outputs(qh))
@@ -153,7 +151,7 @@ def test_suggestion_from_plugin_settings_memory_then_model_guess(qh, ctx):
             {"success": True, "entries": ["Winch is vegetarian and allergic to nuts"]})
         ask(qh, "Any dietary needs?", field="dietary", fn="f2")
         wait_for(lambda: len(cards(ctx)) == 2)
-        assert "vegetarian" in cards(ctx)[1].text and "from memory" in cards(ctx)[1].text
+        assert "vegetarian" in cards(ctx)[1].text
         qid2 = qh.store.questions_for_call(qh.cid)[1]["id"]
         commands.phone_command(f"answer {qid2} decline")
         wait_for(lambda: len(outputs(qh)) == 2)
@@ -164,8 +162,9 @@ def test_suggestion_from_plugin_settings_memory_then_model_guess(qh, ctx):
         ctx.dispatch_tool = broken  # unavailable or erroring: skipped silently
         ask(qh, "Window or aisle?", field="seat", suggested="window", fn="f3")
         wait_for(lambda: len(cards(ctx)) == 3)
-        assert 'Suggested: "window"' in cards(ctx)[2].text
-        assert "voice assistant's guess" in cards(ctx)[2].text
+        assert "Suggested: window" in cards(ctx)[2].text
+        assert qh.store.get_question(qh.store.questions_for_call(qh.cid)[2]["id"])[
+            "card_suggestion"] == "window"
 
 
 def test_answer_buttons_and_text_paths(qh, ctx):
@@ -504,7 +503,7 @@ def test_watcher_stops_when_call_is_terminal_and_edits_final_status(svc, store, 
     watcher.thread.join(3)
     assert not watcher.thread.is_alive() and cid not in svc.watchers
     status = next(m for m in ctx.messages if m.text.startswith(f"Call {cid} to"))
-    assert "ended (no_answer" in status.edits[-1]
+    assert status.edits[-1] == "Call finished \u2014 result below."
 
 
 @pytest.mark.parametrize("mode", ["no_post", "raises", "refused", "no_ctx"])

@@ -121,29 +121,30 @@ def _timeout_s(call: dict) -> int:
 
 
 def question_card(call: dict, q: dict, suggestion: str = "", source: str = "") -> str:
+    """Short and human. What the callee said stays quoted so it reads as their words."""
     qid, cid = q["id"], call["id"]
-    head = f"Call {cid} to {call['callee_name']} is on hold."
-    ask = f'They ask (callee text, untrusted): "{q["question"]}"'
+    who = call["callee_name"]
+    wait = f"No answer in {_timeout_s(call)} s means we call back later."
     if q.get("kind") == "consent":
         fld = q.get("consent_field") or "this"
         return "\n".join([
-            f"{head} They are asking for {fld} information.", ask,
+            f'\u2753 {who} asks for your {fld}: "{q["question"]}"',
             "Nothing sensitive is shared unless you allow it for this call only.",
-            f"Allow with the value: /phone answer {qid} <value>  |  "
-            f"allow my stored value: /phone consent {cid} {fld}",
-            f"Don't share: /phone answer {qid} decline",
-            f"No answer in {_timeout_s(call)} s means we call back later."])
-    lines = [head, ask]
+            f"Allow your stored value: /phone consent {cid} {fld}  |  or send a value: "
+            f'/phone answer {qid} <value>  |  reply "decline" to not share.',
+            wait])
+    lines = [f'\u2753 {who} asks: "{q["question"]}"']
     if suggestion:
-        lines.append(f'Suggested: "{suggestion}" ({source}; a suggestion only, not sent)')
-    lines.append(f"Answer: /phone answer {qid} <text>  |  buttons: /phone answer {qid}  |  "
-                 f"don't share: /phone answer {qid} decline")
-    lines.append(f"No answer in {_timeout_s(call)} s means we call back later.")
+        lines.append(f'Suggested: {suggestion} \u2014 reply "yes" to send it, or type your '
+                     'answer. (Reply "decline" to not share.)')
+    else:
+        lines.append('Type your answer here. (Reply "decline" to not share.)')
+    lines.append(f"{wait} /phone answer {qid} <text> also works.")
     return "\n".join(lines)
 
 
 def resolved_card(call: dict, q: dict) -> str:
-    ask = f'Question (callee text, untrusted): "{q["question"]}"'
+    ask = f'Question: "{q["question"]}"'
     status = q["status"]
     if status == "answered":
         shown = "(value not repeated here)" if q.get("kind") == "consent" else \
@@ -262,7 +263,7 @@ def list_open(svc: Any) -> str:
     qs = svc.store.open_questions()
     if not qs:
         return "No open questions."
-    return "\n".join(f"{q['id']} (call {q['call_id']}): {q['question']!r} (callee text, untrusted)"
+    return "\n".join(f"{q['id']} (call {q['call_id']}): {q['question']!r} (their words)"
                      for q in qs)
 
 
@@ -426,6 +427,10 @@ class CallWatcher:
         else:
             label = STATUS_LABELS.get(state, state)
         text = f"Call {call['id']} to {call['callee_name']}: {label}."
+        if state in states.TERMINAL:
+            # The status message is edited in place, so it keeps its old position in the chat.
+            # Its last edit is short; the real result is a separate, newer message.
+            text = "Call finished \u2014 result below."
         if text == self._status_text:
             return
         if self._status_handle is None:
@@ -482,7 +487,7 @@ class CallWatcher:
                 return  # pre_llm_call still surfaces it to the agent (card_posted stays 0)
             self._cards[qid] = handle
             self._seen[qid] = "open"
-            self.svc.store.mark_card_posted(qid)
+            self.svc.store.mark_card_posted(qid, guess if q.get("kind") != "consent" else "")
             self.svc.store.add_event(self.call_id, "question_card_posted", {"question_id": qid})
             return
         if q["status"] != self._seen.get(qid):

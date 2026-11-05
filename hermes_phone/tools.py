@@ -304,12 +304,13 @@ def _phone_prepare(args: Any, kwargs: Mapping[str, Any], retry_of: str = "") -> 
         card_posted=posted, approve_hint=f"/phone approve {call_id}",
         instructions=(
             ("The approval card is ALREADY shown to the user. Do not repeat or summarise the "
-             "brief. Reply with one short line only, e.g. 'Check the card above and send "
-             f"/phone approve {call_id} to call.' Do not offer unrelated extras. ")
+             "brief. Reply with one short line only, e.g. 'Check the card above and reply "
+             f"\"call\" to place it (or /phone approve {call_id}).' Do not offer extras. ")
             if posted else
-            ("Show the user the card text above verbatim, then tell them to send "
-             f"/phone approve {call_id}. ")
-        ) + "Do not call phone_call yourself: tapping Call in /phone approve dials.",
+            ("Show the user the card text above verbatim, then tell them to reply \"call\" "
+             f"(or send /phone approve {call_id}). ")
+        ) + ("Do not call phone_call yourself: the user's own reply \"call\" or /phone approve "
+             "dials. You cannot approve for them."),
     )
 
 

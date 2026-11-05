@@ -416,7 +416,7 @@ def test_watcher_expires_an_unopened_link(web, clock, ctx):
     cid = web.dialing_call()
     clock.advance(webphone.RING_TIMEOUT_S + 1)
     wait_for(lambda: web.store.get_call(cid)["state"] == states.NO_ANSWER)
-    wait_for(lambda: any("no_answer" in e for m in ctx.messages for e in m.edits + [m.text]))
+    wait_for(lambda: any("finished" in e for m in ctx.messages for e in m.edits + [m.text]))
     assert web.store.get_call(cid)["result"]["reason"] == "no_answer"
 
 
