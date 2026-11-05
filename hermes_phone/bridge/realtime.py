@@ -15,6 +15,8 @@ AUDIO_FORMAT = {"type": "audio/pcmu"}  # G.711 mu-law 8 kHz: identical to Twilio
 TRANSCRIPTION_MODEL = "gpt-4o-mini-transcribe"
 HOLD_LINE = "One moment please, let me check."
 FILLER_LINE = "Thanks for waiting, still checking."
+FILLER_LINE_2 = "Still checking, one moment."
+HOLD_REPLY_LINE = "One moment please, still checking."
 TIMEOUT_LINE = "Sorry, I could not confirm that right now. I'll call back. Thank you!"
 END_OUTCOMES = ["success", "partial", "failed", "needs_followup", "voicemail"]
 
@@ -68,9 +70,10 @@ async def connect_openai(settings: BridgeSettings, call_id: str) -> RealtimeConn
 TOOLS: list[dict] = [
     {"type": "function", "name": "ask_user",
      "description": ("Ask the person you are calling for, the user, a question you cannot answer "
-                     "from your brief. Use it instead of guessing. First say exactly: "
-                     f"\"{HOLD_LINE}\" and then call this tool. The result arrives later; "
-                     "wait for it."),
+                     "from your brief. Use it instead of guessing, and call it right away: do "
+                     "not first say that you cannot or may not provide something. Say only: "
+                     f"\"{HOLD_LINE}\" and call this tool. The result arrives later; wait "
+                     "for it."),
      "parameters": {"type": "object", "properties": {
          "question": {"type": "string", "description": "What you need to know, in one sentence."},
          "field": {"type": "string", "description": "Short key, e.g. 'booking_name'."},
@@ -98,17 +101,21 @@ def build_instructions(payload: dict) -> str:
         f"You are an AI phone assistant calling {payload['callee_name']} on behalf of "
         f"{payload['user_name']}. Speak {payload.get('language', 'en')}. Be brief, polite and "
         "natural; this is a phone call, so use short sentences.",
+        f"YOU ARE CALLING: {payload['callee_name']}",
         f"WHAT YOU ARE CALLING FOR: {payload['goal']}",
         f"FACTS YOU MAY SHARE (only these): {facts}",
         f"OPENING LINE: when told to open the call, say exactly: \"{payload['opening_line']}\" "
         "(once only, never repeat it), then one natural first-person sentence about what you are "
-        "calling for, and wait for a reply. Speak as a person making a request would.",
+        "calling for, and wait for a reply. Speak as a person making a request would. Never "
+        "repeat the introduction: if the callee only says hello again or did not hear you, "
+        "rephrase just the request in one short sentence.",
         "HARD RULES:",
         "1. You are an AI. If anyone asks whether you are a person, a robot or an AI, say "
         "clearly that you are an AI assistant. Never claim to be human.",
-        "2. Never invent answers, names, dates, prices or details. If you do not know, use the "
-        f"ask_user tool instead of guessing. Before calling ask_user say exactly: \"{HOLD_LINE}\" "
-        "(then call the tool). Only one question at a time.",
+        "2. Never invent answers, names, dates, prices or details. If the callee asks for a detail "
+        "you do not have, do NOT say you are unable, unauthorised or lack the information. "
+        f"instead say exactly: \"{HOLD_LINE}\" and call the ask_user tool immediately. Only one "
+        "question at a time.",
         "3. Never share anything that is not in FACTS YOU MAY SHARE. If asked for card details, "
         "an address, ID numbers, bank details, passwords or codes you were not given, say you "
         "are not able to share that and use ask_user if it is needed.",
@@ -150,9 +157,15 @@ def opening_response_instructions(opening_line: str) -> str:
             "the reply.")
 
 
-FILLER_INSTRUCTIONS = (f"You are still waiting for the answer to your question. Say only one short "
-                       f"hold line such as \"{FILLER_LINE}\". Do not answer the question, do not "
-                       "guess, do not call any tool.")
+FILLER_INSTRUCTIONS = ("You are still waiting for the answer to your question. Say exactly one of "
+                       f"these two lines and nothing else: \"{FILLER_LINE}\" or "
+                       f"\"{FILLER_LINE_2}\". Do not answer the question, do not guess, do not "
+                       "call any tool.")
+HOLD_REPLY_INSTRUCTIONS = ("The callee spoke while you wait for an answer you do not have yet. "
+                           f"Say exactly this one short sentence and nothing else: "
+                           f"\"{HOLD_REPLY_LINE}\" Do not explain, do not mention what is being "
+                           "checked or confirmed, do not offer to keep them on the line, do not "
+                           "answer, do not call any tool.")
 TIMEOUT_INSTRUCTIONS = (f"The user could not be reached in time. Say exactly: \"{TIMEOUT_LINE}\" "
                         "and nothing else. Do not call any tool.")
 ANSWER_INSTRUCTIONS = ("Give the callee the answer from the ask_user result now, naturally and "
@@ -177,8 +190,10 @@ def session_update(settings: BridgeSettings, payload: dict) -> dict:
         "audio": {
             "input": {"format": dict(AUDIO_FORMAT),
                       "transcription": {"model": TRANSCRIPTION_MODEL},
-                      # no auto-reply until the forced opening (AI disclosure) was requested
-                      "turn_detection": _turn_detection(create_response=False)},
+                      # no auto-reply and no barge-in until the forced opening (AI
+                      # disclosure) has been fully spoken
+                      "turn_detection": _turn_detection(create_response=False,
+                                                        interrupt_response=False)},
             "output": {"format": dict(AUDIO_FORMAT), "voice": settings.voice},
         },
         "tools": TOOLS,
@@ -186,11 +201,13 @@ def session_update(settings: BridgeSettings, payload: dict) -> dict:
     }}
 
 
-def _turn_detection(*, create_response: bool) -> dict:
-    return {"type": "server_vad", "create_response": create_response, "interrupt_response": True}
+def _turn_detection(*, create_response: bool, interrupt_response: bool = True) -> dict:
+    return {"type": "server_vad", "create_response": create_response,
+            "interrupt_response": interrupt_response}
 
 
-def turn_detection_update(*, create_response: bool) -> dict:
+def turn_detection_update(*, create_response: bool, interrupt_response: bool = True) -> dict:
     """Partial session.update that only flips whether VAD creates responses by itself."""
     return {"type": "session.update", "session": {"type": "realtime", "audio": {"input": {
-        "turn_detection": _turn_detection(create_response=create_response)}}}}
+        "turn_detection": _turn_detection(create_response=create_response,
+                                          interrupt_response=interrupt_response)}}}}

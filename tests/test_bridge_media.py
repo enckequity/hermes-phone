@@ -76,6 +76,10 @@ def test_first_response_forces_ai_disclosure_after_greeting(harness, record):
         wait_for(lambda: responses(harness))
         harness.rt.push({"type": "input_audio_buffer.speech_stopped"})  # second utterance
         time.sleep(0.1)
+        assert len(harness.rt.of("session.update")) == 1  # VAD still locked during the opening
+        harness.rt.push({"type": "response.created", "response": {"id": "rO"}})
+        harness.rt.push({"type": "response.done", "response": {"id": "rO"}})
+        wait_for(lambda: len(harness.rt.of("session.update")) == 2)
     kinds = [e["type"] for e in harness.rt.sent]
     assert kinds[0] == "session.update" and "response.create" in kinds
     assert len(responses(harness)) == 1
@@ -86,12 +90,13 @@ def test_first_response_forces_ai_disclosure_after_greeting(harness, record):
     sess = harness.rt.sent[0]["session"]
     assert "You are an AI" in sess["instructions"]
     assert sess["audio"]["input"]["turn_detection"]["create_response"] is False
-    assert sess["audio"]["input"]["turn_detection"]["interrupt_response"] is True
+    assert sess["audio"]["input"]["turn_detection"]["interrupt_response"] is False
     updates = harness.rt.of("session.update")
     assert len(updates) == 2 and kinds.index("response.create") < kinds.index(
         "session.update", 1)
     td = updates[1]["session"]["audio"]["input"]["turn_detection"]
     assert td["create_response"] is True and td["type"] == "server_vad"
+    assert td["interrupt_response"] is True
 
 
 def test_silent_answerer_gets_the_opening_after_2_5_seconds(harness, clock):
@@ -106,8 +111,9 @@ def test_silent_answerer_gets_the_opening_after_2_5_seconds(harness, clock):
         clock.advance(0.6)
         wait_for(lambda: responses(harness))
         harness.rt.push({"type": "input_audio_buffer.speech_stopped"})  # late hello: no 2nd
-        clock.advance(5)
-        time.sleep(0.1)
+        harness.rt.push({"type": "response.created", "response": {"id": "rO"}})
+        harness.rt.push({"type": "response.done", "response": {"id": "rO"}})
+        wait_for(lambda: len(harness.rt.of("session.update")) == 2)
     assert len(responses(harness)) == 1
     assert harness.rt.of("session.update")[1]["session"]["audio"]["input"][
         "turn_detection"]["create_response"] is True

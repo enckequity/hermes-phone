@@ -55,6 +55,12 @@ class CallSession:
         self.response_active = False
         self._disclosure_checked = False
         self._opening_sent = False  # the forced opening response goes out exactly once
+        self._opening_sent_at = 0.0
+        self._opening_resp = ""  # id of the opening response, once the server created it
+        self._opening_done = False  # barge-in and auto replies stay off until this is True
+        # hold: while a question is pending the model never auto-replies (we send a short line)
+        self._hold_vad = False
+        self._last_hold_at = 0.0
         # lifecycle
         self.wrapup_sent = False
         self.end_requested_at: float | None = None
@@ -147,11 +153,15 @@ class CallSession:
         etype = ev.get("type", "")
         if etype == "response.created":
             self.response_active = True
+            if self._opening_sent and not self._opening_resp and not self._opening_done:
+                self._opening_resp = str((ev.get("response") or {}).get("id") or "?")
             if self._closing_since is not None and not self._closing_resp:
                 self._closing_resp = str((ev.get("response") or {}).get("id") or "?")
         elif etype == "response.done":
             self.response_active = False
             rid = str((ev.get("response") or {}).get("id") or "?")
+            if self._opening_resp and rid == self._opening_resp and not self._opening_done:
+                await self._opening_finished()
             if self._closing_resp and rid == self._closing_resp:
                 self._closing_done = True
         elif etype == "response.output_audio.delta":
@@ -162,6 +172,8 @@ class CallSession:
             self._line("callee", ev.get("transcript", ""))
         elif etype == "input_audio_buffer.speech_stopped":
             await self._send_opening()  # the callee finished their greeting
+            if self._opening_done and self.question_open and not self.hung_up:
+                await self._hold_reply()  # the callee spoke while we wait for the user
         elif etype == "input_audio_buffer.speech_started":
             await self._barge_in()
         elif etype == "response.function_call_arguments.done":
@@ -177,10 +189,18 @@ class CallSession:
         if self._opening_sent:
             return
         self._opening_sent = True
+        self._opening_sent_at = self.clock()
         await self._rt_send({"type": "response.create", "response": {
             "instructions": rt.opening_response_instructions(self.payload["opening_line"])}})
-        # VAD was not allowed to answer on its own until the disclosure had been requested.
-        await self._rt_send(rt.turn_detection_update(create_response=True))
+        # VAD stays unable to answer or interrupt until this response is done (_opening_finished):
+        # a second "Hey." must not cut the disclosure off and restart it.
+
+    async def _opening_finished(self) -> None:
+        if self._opening_done:
+            return
+        self._opening_done = True
+        await self._rt_send(rt.turn_detection_update(
+            create_response=not self._hold_vad, interrupt_response=True))
 
     # ---- audio ---------------------------------------------------------------------------
     async def _on_audio_delta(self, ev: dict) -> None:
@@ -204,6 +224,8 @@ class CallSession:
 
     async def _barge_in(self) -> None:
         """Callee started talking: stop playback, cancel the response, trim what was unheard."""
+        if self._opening_sent and not self._opening_done:
+            return  # the opening (AI disclosure) is never interrupted or restarted
         await self._tw_send({"event": "clear", "streamSid": self.stream_sid})
         if self.response_active:
             await self._rt_send({"type": "response.cancel"})
@@ -249,8 +271,33 @@ class CallSession:
     def _consents(self) -> set[str]:
         return self.store.consents(self.call_id)
 
-    async def _answer_fn(self, fn_call_id: str, output: dict, instructions: str = "") -> None:
+    async def _hold_start(self) -> None:
+        """Pending question: VAD must not auto-create (chatty, leaky) replies; we send our own."""
+        self._hold_vad = True
+        self._last_hold_at = self.clock()
+        if self._opening_done:
+            await self._rt_send(rt.turn_detection_update(create_response=False))
+
+    async def _hold_end(self) -> None:
+        if not self._hold_vad:
+            return
+        self._hold_vad = False
+        if self._opening_done:
+            await self._rt_send(rt.turn_detection_update(create_response=True))
+
+    async def _hold_reply(self) -> None:
+        if self.response_active:
+            return
+        self._last_hold_at = self.clock()
+        self.store.add_event(self.call_id, "hold_reply", {"question_id": self._question_id})
+        await self._rt_send({"type": "response.create", "response": {
+            "instructions": rt.HOLD_REPLY_INSTRUCTIONS, "tool_choice": "none"}})
+
+    async def _answer_fn(self, fn_call_id: str, output: dict, instructions: str = "",
+                         *, end_hold: bool = True) -> None:
         """Send the function_call_output and let the model speak. Never overlaps a response."""
+        if end_hold:
+            await self._hold_end()
         if self.response_active:
             await self._rt_send({"type": "response.cancel"})
             self.response_active = False
@@ -285,7 +332,8 @@ class CallSession:
         if self.question_open:
             await self._answer_fn(fn_call_id, {
                 "status": "busy", "note": "Another question to the user is still pending. "
-                "Tell the callee you are still checking and wait; do not ask again."})
+                "Tell the callee you are still checking and wait; do not ask again."},
+                end_hold=False)
             return
         granted = self._consents()
         needs_consent = sensitive is not None and sensitive not in granted
@@ -300,6 +348,7 @@ class CallSession:
             "question_id": qid, "kind": "consent" if needs_consent else "question"})
         self._set_state(states.ON_HOLD_FOR_USER)
         self._question_id = qid
+        await self._hold_start()
         self._question_task = asyncio.create_task(self._await_answer(
             qid, fn_call_id, sensitive if needs_consent else ""))
 
@@ -332,8 +381,10 @@ class CallSession:
                         await self._on_question_timeout(qid, fn_call_id, q or {})
                         return
                     continue  # the user answered in the same instant: read it next loop
+                next_filler = max(next_filler, self._last_hold_at + self.settings.filler_every_s)
                 if now >= next_filler and not self.response_active:
                     next_filler = now + self.settings.filler_every_s
+                    self._last_hold_at = now
                     self.store.add_event(self.call_id, "hold_filler", {"question_id": qid})
                     await self._rt_send({"type": "response.create", "response": {
                         "instructions": rt.FILLER_INSTRUCTIONS, "tool_choice": "none"}})
@@ -399,6 +450,9 @@ class CallSession:
             await asyncio.sleep(self.settings.tick_s)
             now = self.clock()
             elapsed = now - self.started_at
+            if (self._opening_sent and not self._opening_done
+                    and now - self._opening_sent_at >= self.settings.closing_max_s):
+                await self._opening_finished()  # response.done never arrived: do not stay deaf
             if not self._opening_sent and elapsed >= self.settings.opening_wait_s:
                 await self._send_opening()  # nobody said hello: speak first
             while self._inbox:

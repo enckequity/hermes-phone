@@ -319,6 +319,9 @@ def test_round_trip_disclosure_audio_barge_in_and_end_call(web):
         assert mark["event"] == "mark"
         ws.send_text(json.dumps({"event": "mark", "streamSid": "MWtest",
                                  "mark": {"name": mark["mark"]["name"]}}))
+        # the opening is done: barge-in is allowed from here on (not during the opening)
+        web.rt.push({"type": "response.done", "response": {"id": "r1"}})
+        wait_for(lambda: len(web.rt.of("session.update")) == 2)
         # barge-in
         web.rt.push({"type": "response.output_audio.delta", "item_id": "i2", "delta": OUTBOUND})
         ws.receive_text(), ws.receive_text()
