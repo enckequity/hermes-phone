@@ -466,14 +466,25 @@ SCHEMAS: dict[str, dict] = {
         "description": ("Prepare an outbound phone call and show the user an approval card. "
                         "Never places a call. Use before phone_call."),
         "parameters": {"type": "object", "properties": {
-            "callee_name": _S,
+            "callee_name": {"type": "string",
+                            "description": "Who is called, including any person the user "
+                                           "named, e.g. \"Dr. Smith's dental office\""},
             "number": {"type": "string", "description": "E.164, e.g. +14155550123"},
             "number_source": {"type": "string",
                               "description": "'user' or the URL where the number was found"},
-            "goal": _S,
+            "goal": {"type": "string",
+                     "description": "One full sentence: what to do, with whom, when."},
             "facts_to_share": {"type": "object",
-                               "description": "Key/value facts the agent may say, e.g. "
-                                              "{\"name\":\"Winch\",\"party_size\":4}"},
+                               "description": "Include EVERY non-sensitive detail from the "
+                                              "user's request that the callee may need: "
+                                              "person_to_see (the doctor, stylist or contact "
+                                              "the user named), service, date, time window, "
+                                              "party size, booking name. The voice agent "
+                                              "knows nothing else. e.g. {\"person_to_see\":"
+                                              "\"Dr. Smith\",\"service\":\"teeth "
+                                              "whitening\",\"day\":\"tomorrow\","
+                                              "\"time_window\":\"11:00-14:00\","
+                                              "\"name\":\"Winch\"}"},
             "sensitive_fields": {"type": "array", "items": {"type": "string", "enum": list(
                 consent.SENSITIVE_FIELDS)}, "description": "Fields that need per-call consent"},
             "language": {"type": "string", "default": "en"},

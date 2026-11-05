@@ -13,8 +13,11 @@ table for 4 at 20:00"). You have four tools: `phone_prepare`, `phone_call`, `pho
 1. **Get the number.** Use the number the user gave, or find it with web search and keep the
    source URL. If several candidates match, ask the user which one. Never guess a number.
 2. **Prepare.** Call `phone_prepare` with `callee_name`, `number` (E.164), `number_source`,
-   `goal` (one sentence), and `facts_to_share` (only what the callee needs, e.g. name, party
-   size, time). List any sensitive field you may need in `sensitive_fields`
+   `goal` (one full sentence) and `facts_to_share`: EVERY non-sensitive detail from the user's
+   request that the callee may need. The voice agent knows nothing else, so include the person
+   to see (the doctor or contact the user named, as `person_to_see`), service, date, time
+   window, party size and booking name. Put names the user gave in `callee_name`/`goal` too.
+   List any sensitive field you may need in `sensitive_fields`
    (card, address, id_number, bank, email, phone). It posts an approval card and returns a
    `call_id`. It never dials. When `card_posted` is true the user already sees the card: do NOT
    restate the brief; answer with one short line pointing to `/phone approve <call_id>`.

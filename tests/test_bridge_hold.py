@@ -124,3 +124,16 @@ def test_filler_is_one_of_two_short_lines_and_waits_15s_after_a_hold_reply(qh, c
         assert count(qh, rt.FILLER_LINE) == 0
         clock.advance(6)
         wait_for(lambda: count(qh, rt.FILLER_LINE) == 1)
+
+
+# ---- Problem 1: who is being called reaches the voice model -----------------------------------
+def test_callee_name_and_goal_reach_the_realtime_instructions(qh):
+    with live(qh, callee_name="Doctor Retard dental office",
+              goal="Book a teeth whitening with Doctor Retard tomorrow between 11 and 2",
+              facts_to_share={"person_to_see": "Doctor Retard",
+                              "card_number": "4111 1111 1111 1111"}):
+        text = qh.rt.of("session.update")[0]["session"]["instructions"]
+    assert "YOU ARE CALLING: Doctor Retard dental office" in text
+    assert "Book a teeth whitening with Doctor Retard tomorrow between 11 and 2" in text
+    assert "Doctor Retard" in text.split("FACTS YOU MAY SHARE")[1]
+    assert "4111" not in text  # sensitive filtering unchanged
