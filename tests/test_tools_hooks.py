@@ -138,6 +138,7 @@ def test_allow_all_env(svc):
 
 # -- quiet hours and rate limits through the tools -------------------------------------------
 def test_quiet_hours_refused_then_override(svc, clock):
+    svc.environ["HERMES_PHONE_QUIET_HOURS"] = "on"  # opt-in
     clock.advance(-10 * 3600)  # 05:00 New York
     out = prepare()
     assert out.get("quiet_hours")
@@ -146,6 +147,7 @@ def test_quiet_hours_refused_then_override(svc, clock):
 
 
 def test_quiet_hours_rechecked_at_dial(svc, clock):
+    svc.environ["HERMES_PHONE_QUIET_HOURS"] = "on"  # opt-in
     cid = prepare()["call_id"]
     approve(svc, cid)
     clock.advance(12 * 3600)  # 03:00 UTC next day = 22:00 in New York: past quiet-hours start
@@ -392,3 +394,9 @@ def test_prepare_tells_agent_not_to_repeat_posted_card(svc):
     assert out["card_posted"] is True
     assert "Do not repeat" in out["instructions"]
     assert f"/phone approve {out['call_id']}" in out["instructions"]
+
+
+def test_quiet_hours_off_by_default(svc, clock):
+    clock.advance(-10 * 3600)  # 05:00 New York
+    out = prepare()
+    assert "error" not in out, out

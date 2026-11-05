@@ -121,6 +121,17 @@ class PhoneService:
             return default
         return default if value is None else value
 
+    def quiet_hours_on(self) -> bool:
+        """Quiet hours (08:00-21:00 callee time) are opt-in: config `enforce_quiet_hours: true`
+        or env HERMES_PHONE_QUIET_HOURS=on. Off by default: calls only go to numbers the
+        developer allowlisted, and every call needs the user's explicit approval."""
+        env = str(self.environ.get("HERMES_PHONE_QUIET_HOURS", "")).strip().lower()
+        if env in ("on", "1", "true", "yes"):
+            return True
+        if env in ("off", "0", "false", "no"):
+            return False
+        return bool(self.config("enforce_quiet_hours", False))
+
     def config_int(self, key: str, default: int) -> int:
         try:
             return int(self.config(key, default))
@@ -270,7 +281,7 @@ def _phone_prepare(args: Any, kwargs: Mapping[str, Any], retry_of: str = "") -> 
     allow = safety.check_allowlist(e164, svc.environ)
     if not allow.ok:
         return _error(allow.reason, blocked=True)
-    quiet = safety.check_quiet_hours(e164, svc.now(), override)
+    quiet = safety.check_quiet_hours(e164, svc.now(), override or not svc.quiet_hours_on())
     if not quiet.ok:
         return _error(quiet.reason, quiet_hours=True)
 
@@ -366,7 +377,7 @@ def _phone_call(args: Any, kwargs: Mapping[str, Any]) -> str:
     if not allow.ok:
         return _error(allow.reason, blocked=True)
     override = bool(call["brief"].get("quiet_hours_override"))
-    quiet = safety.check_quiet_hours(number, svc.now(), override)
+    quiet = safety.check_quiet_hours(number, svc.now(), override or not svc.quiet_hours_on())
     if not quiet.ok:
         return _error(quiet.reason, quiet_hours=True)
     limit = svc.config_int("daily_call_limit", safety.DEFAULT_DAILY_LIMIT)
