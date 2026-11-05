@@ -385,3 +385,10 @@ def test_commands_usage_and_unknowns(svc):
     assert commands.phone_command("bogus").startswith("Usage")
     for raw in ("approve", "cancel", "consent", "consent x", "transcript", "status zzz"):
         assert isinstance(commands.phone_command(raw), str)
+
+
+def test_prepare_tells_agent_not_to_repeat_posted_card(svc):
+    out = prepare()
+    assert out["card_posted"] is True
+    assert "Do not repeat" in out["instructions"]
+    assert f"/phone approve {out['call_id']}" in out["instructions"]

@@ -16,7 +16,8 @@ table for 4 at 20:00"). You have four tools: `phone_prepare`, `phone_call`, `pho
    `goal` (one sentence), and `facts_to_share` (only what the callee needs, e.g. name, party
    size, time). List any sensitive field you may need in `sensitive_fields`
    (card, address, id_number, bank, email, phone). It posts an approval card and returns a
-   `call_id`. It never dials.
+   `call_id`. It never dials. When `card_posted` is true the user already sees the card: do NOT
+   restate the brief; answer with one short line pointing to `/phone approve <call_id>`.
 3. **Wait for approval.** Tell the user to approve with `/phone approve <call_id>`
    (Call / Edit / Cancel). Do not call `phone_call` until they have. You cannot approve for them.
    Approval is for that exact call id, is valid for 15 minutes and works once.

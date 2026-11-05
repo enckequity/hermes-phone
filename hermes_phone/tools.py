@@ -302,8 +302,14 @@ def _phone_prepare(args: Any, kwargs: Mapping[str, Any], retry_of: str = "") -> 
     return _json(
         call_id=call_id, state=states.AWAITING_APPROVAL, brief=brief, card=card,
         card_posted=posted, approve_hint=f"/phone approve {call_id}",
-        instructions=("Do not call phone_call yet. The user must approve this exact call id "
-                      "with /phone approve. Tell them the brief and wait."),
+        instructions=(
+            ("The approval card is ALREADY shown to the user. Do not repeat or summarise the "
+             "brief. Reply with one short line only, e.g. 'Check the card above and send "
+             f"/phone approve {call_id} to call.' Do not offer unrelated extras. ")
+            if posted else
+            ("Show the user the card text above verbatim, then tell them to send "
+             f"/phone approve {call_id}. ")
+        ) + "Do not call phone_call yourself: tapping Call in /phone approve dials.",
     )
 
 
