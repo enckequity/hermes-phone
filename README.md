@@ -8,7 +8,7 @@
 
 Twilio Media Streams + OpenAI Realtime, native Hermes hooks, slash commands and live messages. Works from Telegram, Discord, Slack or the CLI.
 
-Demo video: DEMO_VIDEO_URL
+Demo video: https://x.com/winchxyz/status/2118238897209802889
 
 ## How it works
 
