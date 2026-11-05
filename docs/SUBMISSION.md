@@ -12,7 +12,7 @@ Source: https://hermes-agent.nousresearch.com/docs/developer-guide/plugins/catal
 ```yaml
 name: hermes-phone
 title: Hermes Phone
-repo: https://github.com/<you>/hermes-phone
+repo: https://github.com/winchxyz/hermes-phone
 sha: "<40-char commit sha>"
 version: "0.1.0"
 description: |
@@ -24,10 +24,10 @@ description: |
   streams call audio to OpenAI Realtime, runs a local FastAPI server exposed via
   your tunnel (PUBLIC_BASE_URL), stores call logs and transcripts in plugin data.
   Recording is off by default. Emergency and premium numbers are blocked.
-maintainer: <github-handle>
+maintainer: winchxyz
 tier: community
-category: tools
-docs_url: https://github.com/<you>/hermes-phone#readme
+category: voice
+docs_url: https://github.com/winchxyz/hermes-phone#readme
 platforms: []
 capabilities:
   provides_tools: [phone_prepare, phone_call, phone_status, phone_transcript]
@@ -58,4 +58,5 @@ capabilities:
 - Recording consent: some places require all-party consent. Recording is opt-in and announced.
 - US TCPA/FCC: AI-generated voices in calls are treated as "artificial voice" (FCC ruling Feb 2024, UNVERIFIED citation link). This plugin only makes user-initiated, one-off calls to businesses the user chose, never bulk or marketing calls.
 - No emergency numbers. No calls to people who did not expect them for sales. Rate limits enforced.
-- Twilio trial accounts can only call verified numbers and play a trial message, which is fine for the demo.
+- Twilio trial accounts cannot run custom call instructions (they play a trial message), and upgraded accounts need an approved Trust Hub customer profile (KYC). Web phone mode needs no Twilio account and is the easiest way to try the plugin.
+- Valid catalog categories: desktop, memory, platform, web, tools, voice, automation, models, general.

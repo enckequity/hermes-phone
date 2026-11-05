@@ -1,130 +1,100 @@
 # hermes-phone
 
-> **hermes-phone** lets your Hermes agent make the phone calls you keep putting off. Say "book a table" or "ask the clinic if they have a slot Friday", check the brief, tap Call. The agent introduces itself as an AI, handles the conversation, and when the other side asks something it doesn't know, it puts them on a polite hold and asks you in chat, with a suggested answer ready. You get the result, the confirmation number and the transcript. No call without your approval, no surprise sharing of card or address, no auto-redials, emergency numbers blocked.
->
-> Twilio Media Streams + OpenAI Realtime, native Hermes hooks, slash commands and live messages. Works from Telegram, Discord, Slack or the CLI.
+[![ci](https://github.com/winchxyz/hermes-phone/actions/workflows/ci.yml/badge.svg)](https://github.com/winchxyz/hermes-phone/actions/workflows/ci.yml)
 
-Status: P0 (scaffold), P1 (approval and safety) and P2 (media bridge: Twilio Media Streams <->
-OpenAI Realtime) are implemented and unit tested against mocks. No real call has been placed yet.
-See `docs/PROGRESS.md`.
+**hermes-phone lets your Hermes agent make the phone calls you keep putting off.** Say "book a table" or "ask the clinic if they have a slot Friday", check the brief, tap Call. The agent introduces itself as an AI, handles the conversation, and when the other side asks something it doesn't know, it puts them on a polite hold and asks you in chat, with a suggested answer ready. You get the result, the confirmation number and the transcript. No call without your approval, no surprise sharing of card or address, no auto-redials, emergency numbers blocked.
+
+Twilio Media Streams + OpenAI Realtime, native Hermes hooks, slash commands and live messages. Works from Telegram, Discord, Slack or the CLI.
+
+Demo video: DEMO_VIDEO_URL
+
+## How it works
+
+1. **Ask.** "Call Bella Napoli and book a table for 4 tonight at 8." The agent finds or takes the number and calls `phone_prepare`, which only creates a brief card (who, number, goal, exact opening line, what will and won't be shared, limits).
+2. **Approve.** You tap **Call** (`/phone approve <id>`). Nothing is dialed before that.
+3. **Call.** The agent's first sentence is "Hi, this is an AI assistant calling on behalf of ...". If the other side asks something the brief doesn't cover, the agent says "One moment please, let me check", and a question card with a suggested answer lands in your chat. You answer, it continues. No answer within about 75 s: it says it will call back and the result is `needs_followup`.
+4. **Result.** One result message (outcome, what was agreed, confirmation number, next steps, duration, estimated cost) and `/phone transcript <id>` for the full text.
+
+```mermaid
+sequenceDiagram
+    actor U as You (chat)
+    participant H as Hermes + hermes-phone
+    participant B as Bridge (FastAPI)
+    participant C as Callee
+    U->>H: "Call Bella Napoli, table for 4 at 8"
+    H->>U: Brief card (Call / Edit / Cancel)
+    U->>H: Call (approval for this call id)
+    H->>B: Dial
+    B->>C: Rings. "Hi, this is an AI assistant ..."
+    C->>B: "Inside or terrace?"
+    B->>H: ask_user (caller on polite hold)
+    H->>U: Question card + suggested answer
+    U->>H: Answer
+    H->>B: Answer
+    B->>C: "Terrace, please."
+    B->>H: Call ended
+    H->>U: Result + transcript
+```
+
+Text version: you ask, the agent prepares a card, you approve, the bridge dials and the agent discloses it is an AI, a mid-call question goes to your chat with a suggestion while the callee waits, your answer is spoken, and when the call ends you get one result message and the transcript.
 
 ## Safety model
 
-- **Approval gate.** `phone_prepare` only creates a brief card. `phone_call` is refused unless the
-  user approved that exact call id with `/phone approve <id>` (Call / Edit / Cancel). Approval is
-  one-use and expires after 15 minutes. Enforced in the `pre_tool_call` hook and again in the handler.
-- **Hard blocklist.** Emergency numbers (911, 112, 999, 000, 110, 119, 100-103, ...), premium prefixes
-  (1-900, 1-976) and anything with fewer than 6 national digits are refused at prepare and at dial.
-  Not configurable.
-- **Fail-closed allowlist.** Only numbers in `HERMES_PHONE_TEST_ALLOWLIST` (comma-separated E.164)
-  can be dialed. If it is unset or empty, **all dialing is refused**. A developer can disable the
-  allowlist by exporting `HERMES_PHONE_ALLOW_ALL=1` in the environment; the model has no way to set it.
-- **Quiet hours and rate limits.** 08:00 to 21:00 callee local time, 1 active call, daily limit
-  (default 10), 60 s between calls to the same number.
-- **Sensitive data.** card, address, id_number, bank, email and phone values are withheld from the
-  voice model unless you grant per-call consent (`/phone consent <id> <field>`). CVV, passwords and
-  OTP codes are never shared.
-- **AI disclosure** is the first sentence of every call.
-- **Slash commands.** `/phone approve <id>` (buttons, or `/phone approve <id> confirm` where
-  buttons are unavailable), `cancel`, `consent`, `status`, `transcript`, `log`. `answer` and
-  `hangup` arrive in a later phase.
+- **Approval per call id, enforced in three places.** `phone_prepare` never dials. `/phone approve <id>` records a one-use approval (15 min TTL, bound to that call id). The `pre_tool_call` hook blocks `phone_call` without it, the handler re-checks, and the bridge refuses to connect any call without a consumed approval.
+- **AI disclosure is the first sentence of every call**, and the agent always answers yes to "am I talking to a robot?".
+- **Emergency and premium blocklist, not configurable.** 911, 112, 999, 000, 110, 119, 100-103, 1-900, 1-976 and anything under 6 national digits are refused at prepare and at dial.
+- **Dev allowlist, fail-closed.** Only numbers in `HERMES_PHONE_TEST_ALLOWLIST` can be dialed; unset or empty means all dialing is refused. The model cannot change it.
+- **Sensitive-field consent.** Card, address, ID, bank, email and phone values are withheld from the voice model unless you grant that field for that call. CVV, passwords and OTP codes are never shared, with or without consent.
+- **Rate limits.** 1 active call, a daily limit (default 10), 60 s between calls to the same number, hard duration cap of 900 s (default 300).
+- **Quiet hours.** Calls outside 08:00 to 21:00 callee local time are refused unless you explicitly override.
+- **No auto-redial.** No answer, busy or voicemail are reported plainly; `/phone retry <id>` creates a new call that needs a fresh approval.
+- **Kill switch.** `/phone hangup` ends the live call within about a second.
+- **Secrets only from environment variables.** Never logged, never in the image, never in tool output.
 
-## Web phone mode (no Twilio)
+## Two modes
 
-No telephony provider, no phone number to buy. The "callee" is a page in your browser: the agent
-"rings" by posting a link in your chat, you open it, tap **Answer**, and talk to the agent through
-your mic and speakers. The whole pipeline is the same as a real call (AI disclosure first, approval
-card, allowlist, quiet hours, rate limits, mid-call questions to the chat, transcript, max
-duration). The number you give is still validated and allowlisted, but nothing is dialed.
-
-Minimal Railway variables:
-
-| Variable | Value |
-|---|---|
-| `HERMES_PHONE_MODE` | `web` (optional: it is also picked automatically when Twilio is not fully configured) |
-| `OPENAI_API_KEY` | your OpenAI key (Realtime voice) |
-| `PUBLIC_BASE_URL` | `https://<your-railway-domain>` (no trailing slash) |
-| `HERMES_PHONE_TEST_ALLOWLIST` | any valid number to "call", e.g. `+12125550123` |
-| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_USERS` | your bot and your numeric Telegram id |
-| `GEMINI_API_KEY` (or another LLM key, see below) | the agent's brain |
-
-To test: open the Telegram chat and send `/phone check` (it prints `mode: web`). Then ask the
-agent, for example, "call Bella Napoli at +12125550123 and ask if they have a table for 2 tonight".
-Tap **Call** on the approval card. A message arrives: "Ringing in your browser: open this link and
-tap Answer", followed by a plain `https://.../phone/<id>?t=...` URL. Open it on your phone or
-laptop within about a minute, tap **Answer**, allow the microphone, and answer as the restaurant.
-The agent speaks first and says it is an AI. Hang up with the red button or `/phone hangup`.
-Use headphones to avoid echo. The link works once; if it expires you get `no_answer` and nothing is
-redialed.
-
-Notes: iOS Safari needs the tap on Answer to start audio (the page does this), the screen should
-stay on during the call, and the page needs https (Railway provides it).
-
-## Running the bridge
-
-The bridge is a small FastAPI server that connects the Twilio call audio to OpenAI Realtime. It
-must run in the same container as Hermes because both read and write the same SQLite database.
-
-```bash
-export TWILIO_ACCOUNT_SID=... TWILIO_AUTH_TOKEN=... TWILIO_FROM_NUMBER=+1...
-export OPENAI_API_KEY=... HERMES_PHONE_TEST_ALLOWLIST=+1YOUR_TEST_NUMBER
-hermes phone serve                 # or: python -m hermes_phone.bridge  (default 127.0.0.1:8765)
-cloudflared tunnel --url http://localhost:8765   # or: ngrok http 8765
-export PUBLIC_BASE_URL=https://<your-tunnel-host>   # set before starting the bridge and Hermes
-hermes phone doctor                # env names, allowlist, bridge health (never prints secrets)
-```
-
-Twilio signs every webhook; the bridge validates against `PUBLIC_BASE_URL`, so that value must be
-the exact public https URL. Standalone runs read the database path from `HERMES_PHONE_DB_PATH`;
-`hermes phone serve` uses the plugin database. Env: `HERMES_PHONE_BRIDGE_HOST` (default
-127.0.0.1; with Railway's `$PORT` set the bridge binds 0.0.0.0), `HERMES_PHONE_BRIDGE_PORT`,
-`HERMES_PHONE_MODEL` (default `gpt-realtime-2.1`), `HERMES_PHONE_VOICE`. See "Deploy on Railway".
-
-## Deploy on Railway
-
-The repo `Dockerfile` builds `nousresearch/hermes-agent:v0.22.7` plus this plugin and runs, in one
-container, the Hermes gateway (Telegram, long polling) and the bridge (`/healthz`, Twilio webhooks,
-media stream on `$PORT`). Both share one SQLite file, `/opt/data/plugin-data/hermes-phone/data.db`
-(`HERMES_PHONE_DB` is baked into the image). The plugin is copied into
-`/opt/data/plugins/hermes-phone` and enabled in `config.yaml` on every boot; the bridge is an s6
-service of the base image, so it is restarted if it exits. Railway builds it on every push to main
-(`railway.json`; CI also runs `docker build`).
-
-Manual steps in Railway:
-
-1. Add a **Volume** to the service, mount path `/opt/data` (Hermes home: config, sessions, the DB).
-2. Settings, Networking, **Generate Domain**; set `PUBLIC_BASE_URL=https://<that domain>` (no
-   trailing slash). Twilio signatures are validated against it.
-3. Set the variables below, redeploy, then check `https://<domain>/healthz` returns `{"ok":true}`.
-4. Set `PORT=8765` and point the generated domain at port **8765**. Railway's port picker may suggest 8642: that is the Hermes API server, never expose it publicly.
-
-| Variable | Required | Purpose |
+| | Twilio mode | Web phone mode |
 |---|---|---|
-| `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER` | for Twilio mode | Twilio credentials and caller id (E.164) |
-| `HERMES_PHONE_MODE` | optional | `web` (browser as the callee, no Twilio) or `twilio`; unset picks Twilio when fully configured, else web when `OPENAI_API_KEY` and `PUBLIC_BASE_URL` are set |
-| `OPENAI_API_KEY` | for calls | OpenAI Realtime voice |
-| `PUBLIC_BASE_URL` | for calls | Public https URL of the Railway domain |
-| `HERMES_PHONE_TEST_ALLOWLIST` | for calls | Comma-separated E.164 numbers that may be dialed; empty means all dialing is refused |
-| `TELEGRAM_BOT_TOKEN` | yes | Bot token from BotFather |
-| `TELEGRAM_ALLOWED_USERS` | yes | Comma-separated numeric Telegram user ids; unset denies everyone |
-| `GEMINI_API_KEY` | one LLM key (free, primary) | Google AI Studio key (https://aistudio.google.com/app/apikey, free tier). With no provider set in `config.yaml` or `HERMES_INFERENCE_PROVIDER`, boot writes `model.provider: gemini` and `model.default: gemini-3.8-flash` |
-| `HERMES_PHONE_LLM_MODEL` | optional | Overrides `model.default` for any provider, e.g. `gemini-3.7-flash` |
-| `OPENROUTER_API_KEY` | alternative free path | Set `HERMES_INFERENCE_PROVIDER=openrouter` and `HERMES_PHONE_LLM_MODEL` to a `:free` model (e.g. `z-ai/glm-5.2:free`); `HERMES_PHONE_FREE_ONLY=1` sets `auxiliary.free_only` so background tasks never use a paid OpenRouter model |
-| `OPENAI_API_KEY` as the brain too | simplest (paid, cheap) | Set `HERMES_INFERENCE_PROVIDER=openai` and `HERMES_PHONE_LLM_MODEL=gpt-5-mini`. Without an explicit provider, Hermes `auto` sees `OPENAI_API_KEY` (needed for Realtime) and pairs it with the image's non-OpenAI default model, which fails with HTTP 404 |
-| `ANTHROPIC_API_KEY`, `NOUS_API_KEY`, ... | alternative (paid) | Any other Hermes provider; set `HERMES_INFERENCE_PROVIDER` |
-| `HERMES_MODEL` | optional | Written to `model.default` (lower precedence than `HERMES_PHONE_LLM_MODEL`) |
-| `HERMES_PHONE_USER_NAME` | recommended | Plugin setting `user_name` (who the agent calls on behalf of) |
-| `HERMES_PHONE_CALLBACK_NUMBER` | optional | Plugin setting `callback_number` |
+| Callee | A real phone number (PSTN) | A page in your browser |
+| Needs | Twilio account and number, OpenAI key, public URL | OpenAI key, public URL |
+| Cost | Twilio minutes + Realtime | Realtime only |
+| Best for | Real calls | Trying the whole flow in minutes |
+
+**Twilio.** Real calls. Two lessons from live testing: a Twilio **trial** account cannot run custom call instructions (calls play a trial message instead), and an **upgraded** account needs an approved Trust Hub customer profile (KYC) before you can place calls from your number. Plan for that before demo day.
+
+**Web phone.** No telephony account at all. The agent "rings" by posting a link in your chat; you open it, tap **Answer**, allow the mic, and play the callee. The full pipeline is the same (approval, disclosure, allowlist, quiet hours, mid-call questions, transcript). Use headphones; the link works once; an unanswered link ends as `no_answer` with no redial. Mode is picked by `HERMES_PHONE_MODE` (`web` or `twilio`), or automatically: Twilio when fully configured, else web.
+
+## Quick start
+
+### Railway (one container, official Hermes image)
+
+The `Dockerfile` builds `nousresearch/hermes-agent` plus this plugin and runs the Hermes gateway (Telegram) and the bridge in one container, sharing one SQLite file.
+
+1. Deploy this repo on Railway. Add a **Volume** mounted at `/opt/data`.
+2. Set `PORT=8765`. Generate a domain and point it at target port **8765**. Never expose 8642: that is the Hermes API server.
+3. Set `PUBLIC_BASE_URL=https://<your domain>` (no trailing slash) and the variables below, then redeploy. `https://<domain>/healthz` should return `{"ok":true}`.
+4. In your Telegram chat send `/phone check`. It prints the mode and which variables are set (names only, never values).
+
+| Variable | Needed | Purpose |
+|---|---|---|
+| `OPENAI_API_KEY` | yes | OpenAI Realtime voice |
+| `PUBLIC_BASE_URL` | yes | Public https URL of the domain |
+| `HERMES_PHONE_TEST_ALLOWLIST` | yes | Comma-separated E.164 numbers that may be dialed; empty refuses all |
+| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_USERS` | yes | Bot token and numeric Telegram user ids (unset denies everyone) |
+| `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER` | Twilio mode | Credentials and caller id (E.164) |
+| `HERMES_PHONE_MODE` | optional | `web` or `twilio` |
+| `HERMES_PHONE_USER_NAME`, `HERMES_PHONE_CALLBACK_NUMBER` | recommended / optional | Who the agent calls for; callback number it may give |
 | `HERMES_PHONE_QUESTION_TIMEOUT_S`, `_MAX_DURATION_S`, `_DAILY_CALL_LIMIT`, `_VOICE`, `_MODEL` | optional | Other plugin settings |
 
-At boot `deploy/boot-config.py` merges the plugin settings and model keys into
-`/opt/data/config.yaml` (Hermes format; blank variables never overwrite; `auth.json` and `.env`
-are never touched). If Twilio or OpenAI variables are missing the bridge still starts and
-`/healthz` is OK, but every webhook is refused and `phone_call` fails closed. Secret values are
-never logged; the Gemini free tier allows only a few hundred requests a day and Hermes makes several per turn, so expect quota errors under heavy use; missing variables are reported by name only. Only set secrets in Railway variables,
-never in the image.
+**The agent's brain (one of):**
 
-## Development
+- **OpenAI:** `HERMES_INFERENCE_PROVIDER=openai` and `HERMES_PHONE_LLM_MODEL=gpt-5-mini`. Simplest; reuses `OPENAI_API_KEY`. Set the provider explicitly, otherwise Hermes pairs your OpenAI key with the image's default non-OpenAI model and fails with HTTP 404.
+- **Gemini:** `GEMINI_API_KEY` (Google AI Studio free tier). Used by default when no provider is set. The free tier is small and Hermes makes several requests per turn, so expect quota errors under heavy use.
+- **OpenRouter:** `OPENROUTER_API_KEY`, `HERMES_INFERENCE_PROVIDER=openrouter`, `HERMES_PHONE_LLM_MODEL=<a :free model>`.
+
+At boot `deploy/boot-config.py` merges these into Hermes' `config.yaml`. Blank variables never overwrite anything.
+
+### Local / development
 
 ```bash
 uv venv .venv && uv pip install -p .venv/bin/python -e '.[dev]'
@@ -132,4 +102,54 @@ uv venv .venv && uv pip install -p .venv/bin/python -e '.[dev]'
 .venv/bin/ruff check .
 ```
 
-With Hermes installed: `hermes plugins validate . --install-deps` and `hermes plugins doctor . --ci`.
+To run the bridge yourself: `hermes phone serve` (or `python -m hermes_phone.bridge`, default `127.0.0.1:8765`), expose it with `cloudflared tunnel --url http://localhost:8765` or ngrok, and set `PUBLIC_BASE_URL` to that exact https URL (Twilio signatures are validated against it). `hermes phone doctor` checks env names, allowlist and bridge health. With Hermes installed: `hermes plugins validate . --install-deps` and `hermes plugins doctor . --ci`. The bridge must run in the same container as Hermes: both use the same SQLite database.
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `/phone approve <id>` | Approve the brief and place the call (Call / Edit / Cancel buttons; `/phone approve <id> confirm` where buttons are unavailable) |
+| `/phone cancel <id>` | Cancel a prepared call |
+| `/phone answer [<qid> [text]]` | List open questions, pick the suggestion, or answer a mid-call question (`decline` to refuse) |
+| `/phone consent <id> <field>` | Allow one sensitive field for one call |
+| `/phone status [<id>]` | State of a call |
+| `/phone transcript <id>` | Full transcript |
+| `/phone log [n]` | Recent calls |
+| `/phone retry <id>` | New call from an unanswered one; needs fresh approval, once per brief |
+| `/phone hangup [<id>]` | End the live call now |
+| `/phone check` | Setup report: mode, allowlist, variables (names only) |
+
+Agent tools: `phone_prepare`, `phone_call`, `phone_status`, `phone_transcript`. A bundled skill (`phone-calls`) teaches the agent the workflow.
+
+## Costs (estimate)
+
+Roughly 0.014 USD per minute for Twilio US outbound plus an assumed 0.15 USD per minute for OpenAI Realtime audio: a 1-minute call is about 0.2 USD. Web phone mode has no telephony cost, only Realtime. These are estimates, not bills; both rates are configurable (`twilio_cost_per_min_usd`, `realtime_cost_per_min_usd`) and the result message shows the estimate.
+
+## Reliability
+
+- **415 unit tests** (`pytest -m "not e2e"`, no network), ruff clean.
+- **CI** on every push: unit tests on Python 3.11 and 3.12; the official `hermes plugins validate` and `hermes plugins doctor --ci` against a pinned hermes-agent commit; and a `docker build` with an import smoke test.
+- **Exactly one result per call.** Every terminal state (success, partial, failed, needs_followup, no_answer, busy, voicemail, aborted, canceled, expired) produces one result message, enforced by a write-once result and a posted marker.
+- **Restart safety.** State lives in SQLite. If Hermes restarts mid-call the bridge keeps the call and writes the result; the plugin posts any unposted result afterwards, once.
+- Honest limits: unit tests use mocks for Twilio and OpenAI; real calls have been tested by hand, not in CI.
+
+## Legal notes (not legal advice)
+
+- **AI disclosure** opens every call. Some jurisdictions require it; it is the honest default anyway.
+- **Recording consent.** Some places require all-party consent. Recording is off by default, opt-in per call, and announced on the call. Transcripts are text kept in plugin storage (disable with `store_transcripts: false`).
+- **US TCPA / FCC.** The FCC treats AI-generated voices in calls as "artificial voice". This plugin only makes user-initiated, one-off calls to businesses you chose; it is not built for bulk, marketing or unsolicited calls, and the rate limits are there to keep it that way.
+- No emergency numbers, no premium numbers, no auto-redial. You are responsible for how you use it.
+
+## Capability disclosure
+
+For catalog reviewers:
+
+- Places **outbound PSTN calls through your own Twilio account** (costs money). Web mode places none.
+- **Streams call audio to OpenAI Realtime** (third party) using your API key.
+- Runs a **local FastAPI bridge** (webhooks and media WebSocket) exposed through `PUBLIC_BASE_URL`; Twilio requests are signature-validated, media sockets need a single-use token.
+- Stores call logs and transcripts in **plugin data (SQLite)**.
+- No telemetry, no self-update, no core patching, no reading of credential files. Secrets come only from environment variables.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
