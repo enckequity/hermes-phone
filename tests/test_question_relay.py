@@ -618,3 +618,16 @@ def test_card_that_never_posted_gets_a_closing_message_not_silence(svc, store, c
     relay.CallWatcher(svc, cid)._step()
     assert any("Which date?" in m.text and "ended" in m.text.lower() or "No answer" in m.text
                for m in ctx.messages)
+
+
+def test_instructions_tell_the_agent_to_accept_fitting_offers_not_ask():
+    text = rt.build_instructions({"callee_name": "Dan", "user_name": "Winch", "goal": "book",
+                                  "facts": {"time_window": "1-4 PM"}, "opening_line": "Hi",
+                                  "language": "en"})
+    assert "ACCEPT any offer that fits the facts" in text
+    assert "inside the requested window" in text
+    assert "is for 1 person unless the facts say otherwise" in text
+    assert "never ask for party size" in text
+    assert "booking name is the user_name or name fact" in text
+    desc = next(t for t in rt.TOOLS if t["name"] == "ask_user")["description"]
+    assert "Never use it for an offer that fits the facts" in desc and "1 person" in desc

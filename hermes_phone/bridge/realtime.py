@@ -69,9 +69,12 @@ async def connect_openai(settings: BridgeSettings, call_id: str) -> RealtimeConn
 # ---- tools ------------------------------------------------------------------------------
 TOOLS: list[dict] = [
     {"type": "function", "name": "ask_user",
-     "description": ("Ask the person you are calling for, the user, a question you cannot answer "
-                     "from your brief. Use it instead of guessing, and call it right away: do "
-                     "not first say that you cannot or may not provide something. Say only: "
+     "description": ("Ask the person you are calling for, the user, a question you cannot "
+                     "answer from your brief and cannot reasonably infer. Never use it for an "
+                     "offer that fits the facts (accept it), for the party size of a personal "
+                     "appointment (1 person), or for the booking name (it is in the facts). "
+                     "Use it instead of guessing, and call it right away: do not first say "
+                     "that you cannot or may not provide something. Say only: "
                      f"\"{HOLD_LINE}\" and call this tool. The result arrives later; wait "
                      "for it."),
      "parameters": {"type": "object", "properties": {
@@ -116,6 +119,13 @@ def build_instructions(payload: dict) -> str:
         "you do not have, do NOT say you are unable, unauthorised or lack the information. "
         f"instead say exactly: \"{HOLD_LINE}\" and call the ask_user tool immediately. Only one "
         "question at a time.",
+        "2b. DECIDE, do not ask. ACCEPT any offer that fits the facts without asking the user: a "
+        "time inside the requested window or on the requested day, the requested service or "
+        "person. Say yes, confirm it back and carry on. Ask the user only for something truly "
+        "missing from the facts and not reasonably implied. A personal appointment for the user "
+        "is for 1 person unless the facts say otherwise: never ask for party size or the number "
+        "of people for it. The booking name is the user_name or name fact: give it, never ask. "
+        "Only if an offer is outside the facts (another day, outside the window) ask_user.",
         "3. Never share anything that is not in FACTS YOU MAY SHARE. If asked for card details, "
         "an address, ID numbers, bank details, passwords or codes you were not given, say you "
         "are not able to share that and use ask_user if it is needed.",
