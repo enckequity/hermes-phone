@@ -63,8 +63,7 @@ def _answer(svc: Any, questions: list[dict], text: str, user: str) -> str:
     if word in YES_WORDS:
         suggestion = str(q.get("card_suggestion") or "").strip()
         if not suggestion:
-            return ("I have no suggestion for that one. What should I tell them? "
-                    'Type the answer, or reply "decline" to not share.')
+            return relay.NEED_ANSWER
         text = suggestion
     out = relay.answer_question(svc, q["id"], text, user)
     if out.startswith("Sent."):

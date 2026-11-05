@@ -26,6 +26,8 @@ log = logging.getLogger(__name__)
 POLL_S = 0.5
 MAX_ANSWER = 500
 POST_ATTEMPTS = 3
+CARD_ATTEMPTS = 120  # question cards: retry about every second for the whole window
+CARD_RETRY_S = 1.0
 HANGUP_WAIT_S = 2.0
 DECLINE_WORDS = {"decline", "dont-share", "don't-share"}
 NAME_FIELDS = re.compile(r"(^|_)name$|^name$")
@@ -81,6 +83,24 @@ def memory_lookup(ctx: Any, query: str) -> str:
     return ""
 
 
+MEMORY_BUDGET_S = 1.5
+
+
+def _bounded_memory(ctx: Any, query: str) -> str:
+    """``memory_lookup`` with a hard time budget: a slow or blocked memory tool must never delay
+    a question card (the user is being waited for on a live call)."""
+    box: list[str] = []
+    bound = contextvars.copy_context()
+    def work() -> None:
+        box.append(memory_lookup(ctx, query))
+
+    thread = threading.Thread(target=bound.run, args=(work,), daemon=True,
+                              name="hermes-phone-memory")
+    thread.start()
+    thread.join(MEMORY_BUDGET_S)
+    return box[0] if box else ""
+
+
 def suggest(svc: Any, call: dict, q: dict) -> tuple[str, str]:
     """``(suggestion, source)`` for a question card, or ``("", "")``. Never sensitive."""
     if q.get("kind") == "consent":
@@ -96,7 +116,7 @@ def suggest(svc: Any, call: dict, q: dict) -> tuple[str, str]:
     user_name = str(svc.config("user_name", "") or "").strip()
     if user_name and NAME_FIELDS.search(_norm(field)) and not NOT_USER_NAME.search(field):
         return user_name, "from your profile"
-    remembered = memory_lookup(svc.ctx, f"{field} {q.get('question', '')}".strip())
+    remembered = _bounded_memory(svc.ctx, f"{field} {q.get('question', '')}".strip())
     if remembered and not consent.text_fields(remembered, granted):
         return remembered, "from memory"
     guess = str(q.get("suggested") or "").strip()
@@ -124,22 +144,19 @@ def question_card(call: dict, q: dict, suggestion: str = "", source: str = "") -
     """Short and human. What the callee said stays quoted so it reads as their words."""
     qid, cid = q["id"], call["id"]
     who = call["callee_name"]
-    wait = f"No answer in {_timeout_s(call)} s means we call back later."
     if q.get("kind") == "consent":
         fld = q.get("consent_field") or "this"
         return "\n".join([
             f'\u2753 {who} asks for your {fld}: "{q["question"]}"',
             "Nothing sensitive is shared unless you allow it for this call only.",
             f"Allow your stored value: /phone consent {cid} {fld}  |  or send a value: "
-            f'/phone answer {qid} <value>  |  reply "decline" to not share.',
-            wait])
+            f'/phone answer {qid} <value>  |  reply "decline" to not share.'])
     lines = [f'\u2753 {who} asks: "{q["question"]}"']
     if suggestion:
-        lines.append(f'Suggested: {suggestion} \u2014 reply "yes" to send it, or type your '
-                     'answer. (Reply "decline" to not share.)')
+        lines.append(f'Suggested: {suggestion}. Reply "yes" to send it, type another answer, '
+                     'or "decline".')
     else:
-        lines.append('Type your answer here. (Reply "decline" to not share.)')
-    lines.append(f"{wait} /phone answer {qid} <text> also works.")
+        lines.append('Reply with the answer, or "decline".')
     return "\n".join(lines)
 
 
@@ -154,8 +171,19 @@ def resolved_card(call: dict, q: dict) -> str:
         return f"Declined, nothing was shared. {ask}"
     if status == "late":
         return f"Answered too late; the caller was told we will call back. Saved. {ask}"
-    return (f"No answer in time; the caller was told we will call back. You can still answer "
-            f"with /phone answer {q['id']} <text> and it is saved for the callback. {ask}")
+    waited = (q.get("answered_at") or 0) - (q.get("created_at") or 0)
+    if call.get("state") in states.TERMINAL and 0 <= waited < _timeout_s(call) - 1:
+        return f"The call ended before you answered, so nothing was sent. {ask}"
+    return (f"No answer in time; the caller was told we will call back. We will "
+            f"call back later. {ask}")
+
+
+AFFIRMATIVES = frozenset({"yes", "ok", "okay", "yep", "yeah", "sure", "да", "ок", "ага", "угу"})
+NEED_ANSWER = 'What should I tell them? e.g. "1 person"'
+
+
+def is_bare_affirmative(text: str) -> bool:
+    return re.sub(r"^[\s\W_]+|[\s\W_]+$", "", (text or "").lower()).strip() in AFFIRMATIVES
 
 
 # ---- answering --------------------------------------------------------------------------------
@@ -172,6 +200,12 @@ def answer_question(svc: Any, qid: str, text: str, user: str = "") -> str:
     text = (text or "").strip()[:MAX_ANSWER]
     if not text:
         return f"Usage: /phone answer {qid} <text>"
+    if is_bare_affirmative(text):
+        suggestion = str(q.get("card_suggestion") or "").strip()
+        if suggestion and q["kind"] != "consent":
+            text = suggestion
+        else:
+            return NEED_ANSWER
     if text.lower() in DECLINE_WORDS:
         if q["status"] != "open":
             return "The call already moved on; there is nothing to decline any more."
@@ -335,6 +369,7 @@ class CallWatcher:
         self._cards: dict[str, Any] = {}
         self._seen: dict[str, str] = {}
         self._fails: dict[str, int] = {}
+        self._retry_at: dict[str, float] = {}
         self.thread: threading.Thread | None = None
         self.posted_from: list[int] = []  # thread ids that called post_message (tests)
 
@@ -475,7 +510,18 @@ class CallWatcher:
         qid = q["id"]
         handle = self._cards.get(qid)
         if handle is None:
-            if q["status"] != "open" or self._fails.get(qid, 0) >= POST_ATTEMPTS:
+            if qid in self._seen:
+                return
+            now = time.monotonic()
+            if q["status"] != "open":
+                # The card never made it out and the question is already closed: say so once,
+                # so the user is not left with a silent timeout.
+                self._seen[qid] = q["status"]
+                if self._post(resolved_card(call, q)) is not None:
+                    self.svc.store.add_event(self.call_id, "question_card_posted",
+                                             {"question_id": qid, "late": True})
+                return
+            if self._fails.get(qid, 0) >= CARD_ATTEMPTS or now < self._retry_at.get(qid, 0.0):
                 return
             try:
                 guess, source = suggest(self.svc, call, q)
@@ -483,7 +529,10 @@ class CallWatcher:
                 guess, source = "", ""
             handle = self._post(question_card(call, q, guess, source))
             if handle is None:
+                # Transient (gateway busy, bound session not ready): keep trying for the whole
+                # window instead of giving up after a second.
                 self._fails[qid] = self._fails.get(qid, 0) + 1
+                self._retry_at[qid] = time.monotonic() + CARD_RETRY_S
                 return  # pre_llm_call still surfaces it to the agent (card_posted stays 0)
             self._cards[qid] = handle
             self._seen[qid] = "open"

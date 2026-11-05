@@ -75,6 +75,6 @@ def test_card_contains_spec_fields():
                           language="en", quiet_hours_override=False)
     card = brief.format_card(b, "c1")
     for part in ("Who: Bella", "Number: +12125550123", "Goal: Book", "Opening line:",
-                 "Will share: name: W", "Won't share:", "Limits:", "/phone approve c1"):
+                 "Will share: name: W", "Won't share:", "Limits:", "Reply \"call\" to dial"):
         assert part in card
     assert "4111" not in card

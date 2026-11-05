@@ -141,9 +141,8 @@ def format_card(brief: dict, call_id: str) -> str:
     lines.append(f"Will share: {shared}")
     lines.append("Won't share: " + "; ".join(brief["wont_share"]))
     if brief["needs_consent"]:
-        cmds = ", ".join(f"/phone consent {call_id} {f}" for f in brief["needs_consent"])
         lines.append("Needs your consent to share: " + ", ".join(brief["needs_consent"])
-                     + f" (grant with {cmds})")
+                     + " (left out unless you allow it when asked during the call)")
     lines.append(
         f"Limits: max {lim['max_duration_s']} s, "
         f"est. cost up to ${lim['max_cost_estimate_usd']:.2f}, "
@@ -151,8 +150,7 @@ def format_card(brief: dict, call_id: str) -> str:
     )
     if brief["quiet_hours_override"]:
         lines.append("Quiet hours override: yes")
-    lines.append(f'Reply "call" to place it, "cancel" to drop it (or /phone approve {call_id}). '
-                 "Nothing is dialed until you approve.")
+    lines.append('Reply "call" to dial or "cancel".')
     return "\n".join(lines)
 
 

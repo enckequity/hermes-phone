@@ -207,4 +207,37 @@ def test_reply_cannot_dial_an_emergency_number(svc, store):
 
 def test_card_text_mentions_reply(svc):
     res = prepare(None, session_id="S1")
-    assert 'Reply "call" to place it, "cancel" to drop it' in res["card"]
+    assert 'Reply "call" to dial or "cancel".' in res["card"]
+
+
+# ---- bare affirmatives ------------------------------------------------------------------------
+import pytest  # noqa: E402
+
+from hermes_phone import relay  # noqa: E402
+
+
+@pytest.mark.parametrize("word", ["ok", "okay", "yes", "sure", "да", "ок"])
+def test_bare_affirmative_never_sent_without_suggestion(svc, store, clock, word):
+    cid = live_call(store, clock)
+    question(store, cid, field="seating")
+    assert blocked(hook(word)) == relay.NEED_ANSWER
+    assert store.get_question("q1")["status"] == "open"
+    out = commands.phone_command(f"answer q1 {word}", user_id="u1")
+    assert out == relay.NEED_ANSWER
+    assert store.get_question("q1")["status"] == "open"
+
+
+def test_phone_answer_affirmative_sends_the_suggestion(svc, store, clock):
+    cid = live_call(store, clock)
+    question(store, cid, suggestion="2 people", field="seating")
+    assert commands.phone_command("answer q1 okay", user_id="u1").startswith("Sent")
+    assert store.get_question("q1")["answer"] == "2 people"
+
+
+def test_cards_never_mention_phone_commands(svc, store, clock):
+    res = prepare(None, session_id="S1")
+    assert "/phone" not in res["card"]
+    cid = live_call(store, clock)
+    store.add_question("q9", cid, "How many?", "party_size", "")
+    card = relay.question_card(store.get_call(cid), store.get_question("q9"), "", "")
+    assert "/phone" not in card and card.endswith('Reply with the answer, or "decline".')

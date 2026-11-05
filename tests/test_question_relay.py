@@ -108,9 +108,9 @@ def test_question_card_within_3s_suggestion_and_answer_resumes_within_2s(harness
         text = cards(ctx)[0].text
         qid = question_id(harness)
         assert "Suggested:" in text and "Winch" in text and "Bob" not in text
-        assert "Suggested: Winch" in text and 'reply "yes" to send it' in text
+        assert "Suggested: Winch" in text and 'Reply "yes" to send it' in text
         assert 'asks: "What name is the booking under?"' in text and "untrusted" not in text
-        assert 'Reply "decline"' in text and f"/phone answer {qid} <text>" in text
+        assert '"decline"' in text and "/phone" not in text
         assert harness.store.get_call(harness.cid)["state"] == states.ON_HOLD_FOR_USER
         assert outputs(harness) == []  # the function call stays pending
 
@@ -562,3 +562,59 @@ def test_consent_module_classifies_questions():
     assert consent.classify_question("seating", "Terrace or inside?") is None
     assert consent.classify_question("booking_name", "Name for the booking?") is None
     assert consent.classify_question("card", "") == "card"
+
+
+def test_second_question_gets_its_own_card_and_full_timeout_window(qh, clock, ctx):
+    auto_speak(qh)
+    with live(qh):
+        ask(qh, "How many people?", field="party_size")
+        wait_for(lambda: cards(ctx))
+        q1 = question_id(qh)
+        clock.advance(60)  # most of q1's window is gone
+        commands.phone_command(f"answer {q1} 2")
+        wait_for(lambda: outputs(qh))
+        ask(qh, "Which date?", field="date", fn="f2")  # asked straight after the first answer
+        wait_for(lambda: len(qh.store.questions_for_call(qh.cid)) == 2)
+        q2 = qh.store.questions_for_call(qh.cid)[1]["id"]
+        t0 = time.time()
+        wait_for(lambda: len(cards(ctx)) == 2)
+        assert time.time() - t0 < 3
+        assert q2 in cards(ctx)[1].text or "Which date?" in cards(ctx)[1].text
+        clock.advance(60)  # 60 s after q2 was created: still inside its own 75 s window
+        time.sleep(0.2)
+        assert qh.store.get_question(q2)["status"] == "open"
+        assert not any("No answer in time" in e for e in cards(ctx)[1].edits)
+        clock.advance(16)
+        wait_for(lambda: qh.store.get_question(q2)["status"] == "timeout")
+
+
+def test_card_post_is_retried_through_transient_failures(svc, store, clock, ctx, monkeypatch):
+    monkeypatch.setattr(relay, "CARD_RETRY_S", 0.0)
+    cid = prepare(None, session_id="S1")["call_id"]
+    store.update_call(cid, state=states.IN_PROGRESS)
+    store.add_question("q7", cid, "Which date?", "date", "")
+    real = ctx.post_message
+    fails = {"n": 5}
+
+    def flaky(text):
+        if fails["n"] > 0:
+            fails["n"] -= 1
+            return type("H", (), {"ok": False})()
+        return real(text)
+
+    ctx.post_message = flaky
+    w = relay.CallWatcher(svc, cid)
+    for _ in range(10):
+        w._step()
+    assert [m for m in ctx.messages if "Which date?" in m.text]
+    assert store.get_question("q7")["card_posted"] == 1
+
+
+def test_card_that_never_posted_gets_a_closing_message_not_silence(svc, store, clock, ctx):
+    cid = prepare(None, session_id="S1")["call_id"]
+    store.update_call(cid, state=states.IN_PROGRESS)
+    store.add_question("q8", cid, "Which date?", "date", "")
+    store.resolve_question("q8", "timeout")
+    relay.CallWatcher(svc, cid)._step()
+    assert any("Which date?" in m.text and "ended" in m.text.lower() or "No answer" in m.text
+               for m in ctx.messages)
