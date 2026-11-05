@@ -48,7 +48,7 @@ Text version: you ask, the agent prepares a card, you approve, the bridge dials 
 - **Dev allowlist, fail-closed.** Only numbers in `HERMES_PHONE_TEST_ALLOWLIST` can be dialed; unset or empty means all dialing is refused. The model cannot change it.
 - **Sensitive-field consent.** Card, address, ID, bank, email and phone values are withheld from the voice model unless you grant that field for that call. CVV, passwords and OTP codes are never shared, with or without consent.
 - **Rate limits.** 1 active call, a daily limit (default 10), 60 s between calls to the same number, hard duration cap of 900 s (default 300).
-- **Quiet hours.** Calls outside 08:00 to 21:00 callee local time are refused unless you explicitly override.
+- **Quiet hours (opt-in).** With `HERMES_PHONE_QUIET_HOURS=on` (or `enforce_quiet_hours: true`), calls outside 08:00 to 21:00 callee local time are refused unless you explicitly override. Off by default, since dialing is already limited to your allowlist and every call needs your approval.
 - **No auto-redial.** No answer, busy or voicemail are reported plainly; `/phone retry <id>` creates a new call that needs a fresh approval.
 - **Kill switch.** `/phone hangup` ends the live call within about a second.
 - **Secrets only from environment variables.** Never logged, never in the image, never in tool output.
