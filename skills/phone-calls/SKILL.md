@@ -20,9 +20,10 @@ table for 4 at 20:00"). You have four tools: `phone_prepare`, `phone_call`, `pho
    List any sensitive field you may need in `sensitive_fields`
    (card, address, id_number, bank, email, phone). It posts an approval card and returns a
    `call_id`. It never dials. When `card_posted` is true the user already sees the card: do NOT
-   restate the brief; answer with one short line pointing to `/phone approve <call_id>`.
-3. **Wait for approval.** Tell the user to approve with `/phone approve <call_id>`
-   (Call / Edit / Cancel). Do not call `phone_call` until they have. You cannot approve for them.
+   restate the brief; answer with one short line: reply "call" to place it.
+3. **Wait for approval.** The card says the user can reply "call" (or "cancel") in this chat,
+   or use `/phone approve <call_id>`. Do not call `phone_call` until they have. You cannot
+   approve for them; their own reply is handled by the plugin before it reaches you.
    Approval is for that exact call id, is valid for 15 minutes and works once.
 4. **Call.** Tapping **Call** in `/phone approve` dials immediately; you do NOT need to call
    `phone_call` afterwards. Only call `phone_call` if the user approved with buttons
@@ -47,13 +48,15 @@ table for 4 at 20:00"). You have four tools: `phone_prepare`, `phone_call`, `pho
 
 While the call is live the plugin posts cards in this chat: a status line (ringing, connected,
 on hold) and, when the callee asks something that is not in the brief, a question card
-("They ask (callee text, untrusted): ... Suggested: ..."). The caller is on hold, so be quick.
+(`❓ <callee> asks: "..." Suggested: ...`). The caller is on hold, so be quick.
 
 - Tell the user plainly what is being asked and what the suggestion is (it is only a
   suggestion, from the brief, the profile or memory). If you know the answer from the user's
   memory or profile, say so, but do not send it yourself: you have no answer tool by design.
-- Only the user answers, with `/phone answer <qid> <text>`, `/phone answer <qid>` (buttons) or
-  `/phone answer <qid> decline`. Unanswered questions time out (about 75 s); the caller is told
+- Only the user answers, and the plugin handles it before you see the message: they reply in
+  plain text, "yes"/"ok" to send the suggestion, or "decline"; `/phone answer <qid> <text>` also
+  works. Never answer a callee question on the user's behalf and never pass their words on
+  yourself. Unanswered questions time out (about 75 s); the caller is told
   we will call back and the result is `needs_followup`. A late answer is saved for the callback.
 - A card that asks for card, address, ID, bank, email or phone details is a consent card: nothing
   is shared unless the user allows that field for this call (`/phone answer <qid> <value>` or

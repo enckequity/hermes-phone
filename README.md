@@ -119,6 +119,8 @@ To run the bridge yourself: `hermes phone serve` (or `python -m hermes_phone.bri
 | `/phone hangup [<id>]` | End the live call now |
 | `/phone check` | Setup report: mode, allowlist, variables (names only) |
 
+You can also just reply in plain text in the same chat: `call` / `yes` places the one waiting call and `cancel` drops it; the callee's question is answered by typing the answer, `yes` to send the suggestion, or `decline`. The commands above keep working.
+
 Agent tools: `phone_prepare`, `phone_call`, `phone_status`, `phone_transcript`. A bundled skill (`phone-calls`) teaches the agent the workflow.
 
 ## Costs (estimate)
@@ -127,7 +129,7 @@ Roughly 0.014 USD per minute for Twilio US outbound plus an assumed 0.15 USD per
 
 ## Reliability
 
-- **415 unit tests** (`pytest -m "not e2e"`, no network), ruff clean.
+- **443 unit tests** (`pytest -m "not e2e"`, no network), ruff clean.
 - **CI** on every push: unit tests on Python 3.11 and 3.12; the official `hermes plugins validate` and `hermes plugins doctor --ci` against a pinned hermes-agent commit; and a `docker build` with an import smoke test.
 - **Exactly one result per call.** Every terminal state (success, partial, failed, needs_followup, no_answer, busy, voicemail, aborted, canceled, expired) produces one result message, enforced by a write-once result and a posted marker.
 - **Restart safety.** State lives in SQLite. If Hermes restarts mid-call the bridge keeps the call and writes the result; the plugin posts any unposted result afterwards, once.

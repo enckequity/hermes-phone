@@ -138,3 +138,23 @@ No-answer and busy results omit the transcript line (nothing was said).
   no "goal"/"brief" wording. Session rules 5/5b and the `end_call` description: confirm details,
   give the booking name, ask for a confirmation number, thank + goodbye, then `end_call`; a bare
   "OK"/"Book it" is not a confirmation; `success` only on clear confirmation.
+
+
+## Live-demo fixes: names, plain-text replies, calmer voice
+- Voice: `YOU ARE CALLING: <callee_name>` plus the full goal in the Realtime instructions;
+  `phone_prepare` schema and SKILL.md ask for every non-sensitive detail (`person_to_see`,
+  service, date, window, party size, booking name) in `facts_to_share`.
+- Voice: the opening (AI disclosure) cannot be interrupted or restarted: the initial
+  `turn_detection` has `create_response=false, interrupt_response=false` and both are enabled only
+  when that response id is `response.done` (15 s fallback). Instructions: never repeat the
+  introduction; an unknown detail means the hold line plus `ask_user` at once, never "I am not
+  able to provide...". While a question is pending VAD auto-replies are off; callee speech gets one
+  fixed short line; fillers are one of two fixed lines, at most every 15 s.
+- Plugin: plain-text answers and approvals through `pre_llm_call` block (verified Hermes
+  semantics in HERMES_API.md; safety reasoning in ARCHITECTURE.md). Schema v6 adds
+  `calls.origin_session_id` and `questions.card_suggestion`.
+- New cards: question `❓ X asks: "..." Suggested: 1 - reply "yes" ...`; approval card ends with
+  `Reply "call" to place it, "cancel" to drop it (or /phone approve <id>).`; the live status
+  message's final edit is "Call finished - result below." (it is edited in place, so it keeps its
+  old timestamp; the result is a separate newer message).
+- Tests: `tests/test_plain_reply.py`, `tests/test_bridge_hold.py`.

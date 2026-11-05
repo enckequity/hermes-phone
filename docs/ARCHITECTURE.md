@@ -226,3 +226,32 @@ answered but never opened the media socket within 30 s.
   Max one retry per original brief.
 - **Disclosure check.** The bridge looks at the first agent transcript line (even when transcripts
   are not stored) and sets `calls.disclosure_spoken`; `phone_status` reports it.
+
+## Plain-text replies (safety reasoning)
+
+`hermes_phone/reply.py`, called first thing in `pre_llm_call` (verified in HERMES_API.md,
+"`pre_llm_call` block, verified end to end"). Besides `/phone answer` and `/phone approve`, the
+user can reply in plain text in the chat that started the call:
+
+- **Answers.** If that session (call `origin_session_id`, stored by `phone_prepare`) has exactly
+  one open question on a live call, a non-slash message of at most 300 characters answers it. The
+  turn is blocked (no model call) and the reply is `Sent to <callee>: "<answer>"`. A short
+  affirmative sends the suggestion that was shown on the card (`questions.card_suggestion`), and
+  does nothing if there was none. `no`/`decline`/`don't share` decline. A consent question is
+  never answered by "yes": only `decline` works in plain text; sharing needs `/phone consent` or
+  `/phone answer <qid> <value>`. Text that looks like a sensitive value is refused by the same
+  consent check `/phone answer` uses. Two or more open questions fall back to `/phone answer <id>`.
+- **Approvals.** If the session has exactly one `awaiting_approval` card that has not expired, a
+  message that is exactly `call`, `yes`, `go`, `approve`, `да`, `звони` or `позвони` approves and
+  dials it (`commands.approve_by_reply`); `cancel`, `no`, `нет`, `отмена` cancels it. The same
+  re-checks as `/phone approve` run (number validity, allowlist), then `phone_call` runs its own
+  (approval record, blocklist, quiet hours, rate limits, one active call).
+
+Why this is still an explicit human approval: `pre_llm_call` receives the text the human typed
+into that chat; the model cannot produce a user message, and the hook runs before any model call,
+so the model is not involved in the decision. Approval stays bound to that exact call id, that
+session, a timestamp and the 15 minute TTL, and works once. A different chat or session never
+matches (`origin_session_id`), so one conversation cannot answer or approve for another. The
+`pre_tool_call` veto and `check_approval` are unchanged: a model-issued `phone_call` is still
+refused without the recorded approval. Anything not matching exactly falls through to the model
+unchanged.

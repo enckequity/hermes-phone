@@ -365,6 +365,37 @@ Return shapes, `agent/turn_context.py:885-900`:
 - `{"context": "..."}`: text injected into the **user message** (never the system prompt), spilled to disk if oversized.
 - A bare non-empty `str` is also accepted as context (`agent/turn_context.py:897-898`, `elif isinstance(r, str) and r.strip()`).
 
+#### `pre_llm_call` block, verified end to end (used for plain-text replies)
+
+Re-read at the same clone, HEAD `ed1afb08`:
+
+- Runs once per user turn, after the user message is in `messages` and before any model call:
+  `agent/turn_context.py:1232-1238` (`_blocks`, `_collect_pre_llm_call_context(...)`,
+  `plugin_block_message = _blocks[0]`, first veto wins).
+- Kwargs: `session_id`, `task_id`, `turn_id`, `user_message`, `conversation_history`,
+  `is_first_turn`, `model`, `platform`, `parent_session_id`, `sender_id`
+  (`agent/turn_context.py:862-872`). `user_message` is the typed text (`original_user_message`).
+- A block needs a non-empty string `message`; without one it is ignored
+  (`turn_context.py:887-890`).
+- A block skips the turn: turn-start compaction, memory prefetch and titling are all skipped when
+  `plugin_block_message` is set (`turn_context.py:1239-1243`, `:1261`, `:1267`), and
+  `_turn_without_loop` returns before the generic loop with
+  `final_response = block_message` (`agent/conversation_loop.py:1616-1618`, call site `:1739`).
+  So there is NO LLM call, and the message is the turn's final response, i.e. what the gateway
+  sends to the user in that chat. The typed prompt is stored as a withheld placeholder
+  (`turn_context.py:811`, `:1272-1273`). `ctx.post_message` is therefore not needed for the reply
+  (it would also work: hooks run bound to their session, `hermes_cli/plugin_messages.py:3-5`).
+- `session_id` equals the one tools see: `agent/tool_executor.py:822`
+  (`session_id=str(getattr(agent, "session_id", ""))`). The plugin stores it as
+  `origin_session_id` when `phone_prepare` creates the call and only acts on messages whose hook
+  `session_id` matches.
+- Slash commands never reach this hook: the gateway resolves them before the agent runs
+  (`gateway/run_inbound.py:1157-1164` -> `gateway/run_inbound_hooks.py:245-258`,
+  `get_plugin_command_handler`), and a handled command returns its text without a turn. The hook
+  also ignores any message starting with `/`.
+- The hook only sees text the human typed into that chat. The model cannot emit a user message,
+  so a reply handled here is an explicit human decision.
+
 #### Other hook returns (for reference)
 
 - `pre_verify`: `{"action": "continue", "message"}` or `{"decision": "block", "reason"}` (`plugins.py:116-118`).
