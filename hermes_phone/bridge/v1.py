@@ -160,9 +160,10 @@ def usage(row: dict, call: dict, now: float, settings: BridgeSettings) -> dict:
         return max(0, int(round(end - start))) if start is not None else 0
 
     tel, voice = secs(row.get("answered_at")), secs(row.get("media_started_at"))
-    return {"seconds": tel,
-            "telephony_usd": round(tel / 60 * settings.telephony_usd_per_min, 4),
-            "voice_usd": round(voice / 60 * settings.voice_usd_per_min, 4)}
+    tel_usd = round(tel / 60 * settings.telephony_usd_per_min, 4)
+    voice_usd = round(voice / 60 * settings.voice_usd_per_min, 4)
+    return {"cost_usd": round(tel_usd + voice_usd, 4), "seconds": tel,
+            "telephony_usd": tel_usd, "voice_usd": voice_usd}
 
 
 def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
@@ -352,7 +353,7 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
                                            else bool(call["disclosure_spoken"])),
                      "result": result,
                      "usage": usage(row, call, now, settings)},
-            "events": [{"kind": e["kind"], "ts": e["ts"],
+            "events": [{"id": f"e{e['id']}", "kind": e["kind"], "ts": e["ts"],
                         "data": json.loads(e["data_json"] or "{}")}
                        for e in events if not _VENDOR_RE.search(e["kind"])],
             "questions": [{"id": q["id"], "question": q["question"], "field": q["field"] or "",
@@ -360,7 +361,8 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
                            "consent_field": q["consent_field"] or None,
                            "status": "timeout" if q["status"] == "late" else q["status"]}
                           for q in qs],
-            "transcript": ([{"role": x["role"], "text": x["text"], "ts": x["ts"]} for x in lines]
+            "transcript": ([{"id": f"t{x['id']}", "role": x["role"], "text": x["text"],
+                             "ts": x["ts"]} for x in lines]
                            if row["store_transcripts"] else []),
         }
         return JSONResponse(out)

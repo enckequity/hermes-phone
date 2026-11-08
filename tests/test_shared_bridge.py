@@ -410,13 +410,14 @@ def test_one_time_media_token_reuse_refused(sb):
 def test_usage_math(sb):
     iid, _ = sb.dial("c1")
     assert sb.get("/v1/calls/c1/updates").json()["call"]["usage"] == {
-        "seconds": 0, "telephony_usd": 0.0, "voice_usd": 0.0}
+        "cost_usd": 0.0, "seconds": 0, "telephony_usd": 0.0, "voice_usd": 0.0}
     sb.event(iid, "call.answered")
     sb.app.state.ledger.stamp(iid, "media_started_at", sb.clock() + 10)
     sb.clock.advance(90)
     sb.end(iid)
     call = sb.get("/v1/calls/c1/updates").json()["call"]
-    assert call["usage"] == {"seconds": 90, "telephony_usd": 0.018, "voice_usd": 0.08}
+    assert call["usage"] == {"cost_usd": 0.098, "seconds": 90, "telephony_usd": 0.018,
+                             "voice_usd": 0.08}
     assert call["state"] == states.COMPLETED and call["duration_s"] == 90
     sb.clock.advance(600)  # usage is frozen once the call ended
     assert sb.get("/v1/calls/c1/updates").json()["call"]["usage"]["seconds"] == 90
@@ -428,7 +429,9 @@ def test_updates_cursor_questions_and_answers(sb):
     sb.store.add_transcript_line(iid, "agent", "Hi there")
     sb.clock.advance(1)  # a change in the very instant of a poll is sent twice, never lost
     first = sb.get("/v1/calls/c1/updates").json()
-    assert [q["id"] for q in first["questions"]] == ["q1"] and first["transcript"]
+    assert [q["id"] for q in first["questions"]] == ["q1"]
+    assert re.fullmatch(r"t\d+", first["transcript"][0]["id"])
+    assert all(re.fullmatch(r"e\d+", e["id"]) for e in first["events"]) and first["events"]
     sb.clock.advance(1)
     second = sb.get("/v1/calls/c1/updates?cursor=" + first["cursor"]).json()
     assert second["events"] == [] and second["transcript"] == [] and second["questions"] == []
