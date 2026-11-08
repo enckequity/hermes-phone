@@ -511,3 +511,47 @@ def test_no_vendor_names_in_spoken_or_customer_text(sb):
     assert not hits, hits
     assert v1.disclosure("Acme Plumbing") == (
         "Hi, this is an AI assistant calling on behalf of Acme Plumbing.")
+
+
+# ---- review regressions -------------------------------------------------------------------
+def test_call_written_off_is_hung_up_when_carrier_reports_it(sb):
+    sb.tx.fail_dial = True  # the dial "timed out" but the carrier created the call anyway
+    sb.put("c1")
+    iid = sb.app.state.ledger.by_call("wa", "c1")["internal_id"]
+    assert sb.store.get_call(iid)["state"] == states.FAILED
+    r = sb.signed(sb.hook_path(iid), "call.answered", call_control_id="v3:late")
+    assert r.json()["result"] == "ended"
+    assert sb.tx.actions("hangup")[0][0] == "/calls/v3%3Alate/actions/hangup"
+    sb.signed(sb.hook_path(iid), "call.machine.premium.detection.ended",
+              call_control_id="v3:late", result="human")
+    assert not sb.tx.actions("streaming_start")
+
+
+def test_malformed_input_is_4xx_not_500(sb):
+    bad = {"Authorization": f"Bearer {TOKEN_A}", "Content-Type": "application/json"}
+    deep = ("[" * 100000 + "]" * 100000).encode()
+    assert sb.client.put("/v1/calls/c1", content=deep, headers=bad).status_code == 400
+    body = sb.body("c1")
+    body["approval"]["expires_at"] = float("inf")
+    raw = json.dumps(body).encode()  # Infinity
+    assert sb.client.put("/v1/calls/c1", content=raw, headers=bad).status_code == 403
+    sb.dial("c2")
+    r = sb.get("/v1/calls/c2/updates?cursor=99999999999999999999.0.0")
+    assert r.status_code == 200
+
+
+def test_repeat_put_after_approval_expired_returns_existing(sb):
+    body = sb.body("c1")
+    assert sb.put("c1", body=body).status_code == 201
+    sb.clock.advance(3600)
+    assert sb.put("c1", body=body).status_code == 200
+
+
+def test_bad_media_format_closes_1008(sb):
+    iid, _ = sb.dial("c1")
+    answered_human(sb, iid)
+    with sb.client.websocket_connect(f"/v1/media/{iid}?token=x") as ws:
+        ws.send_text(json.dumps({"event": "start", "start": {"media_format": "x"}}))
+        with pytest.raises(WebSocketDisconnect) as exc:
+            ws.receive_text()
+        assert exc.value.code == 1008

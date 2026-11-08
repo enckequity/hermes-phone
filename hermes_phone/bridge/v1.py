@@ -13,6 +13,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import re
 import secrets
 from collections.abc import Callable
@@ -96,7 +97,14 @@ def _sha(text: str) -> str:
 
 
 def _num(v: Any) -> bool:
-    return isinstance(v, (int, float)) and not isinstance(v, bool)
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
+async def _json(request: Request) -> Any:
+    try:
+        return await request.json()
+    except Exception:  # noqa: BLE001 - bad JSON, too deep, wrong encoding: a 400, never a 500
+        return None
 
 
 class Ledger:
@@ -222,10 +230,7 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
             return error("unauthorized")
         if settings.missing_env():
             return error("not_configured")
-        try:
-            body = await request.json()
-        except ValueError:
-            body = None
+        body = await _json(request)
         if (not isinstance(body, dict) or not _ID_RE.match(call_id)
                 or body.get("call_id", call_id) != call_id
                 or not isinstance(body.get("brief"), dict)):
@@ -234,17 +239,19 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
         aid = appr.get("id")
         consumed, expires = appr.get("consumed_at"), appr.get("expires_at")
         now = clock()
-        if (not isinstance(aid, str) or not _APPROVAL_RE.match(aid) or not _num(consumed)
-                or not _num(expires) or expires <= consumed or now >= expires):
+        if not isinstance(aid, str) or not _APPROVAL_RE.match(aid):
             return error("approval_required")
         with store._lock:  # check-then-create is atomic for this process
             row = ledger.by_call(t.workspace, call_id)
-            if row is not None:
+            if row is not None:  # a repeat answers even after the approval expired
                 if row["approval_id"] != aid:
                     return error("conflict")
                 call = store.get_call(row["internal_id"])
                 return JSONResponse({"call_id": call_id, "state": call["state"],
                                      "bridge_call_id": row["internal_id"]})
+            if (not _num(consumed) or not _num(expires) or expires <= consumed
+                    or now >= expires):
+                return error("approval_required")
             if ledger.approval_used(t.workspace, aid):
                 return error("conflict")
             code, e164 = _limits(t, body.get("number"), now)
@@ -262,7 +269,9 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
             log.warning("dial failed: %s", exc)
             store.set_result_once(iid, {"outcome": "failed", "reason": "dial_failed",
                                         "summary": ERRORS["dial_failed"][1]}, "failed")
-            states.transition(store, iid, states.FAILED, reason="dial_failed", outcome="failed")
+            if states.can_transition(store.get_call(iid)["state"], states.FAILED):  # not aborted
+                states.transition(store, iid, states.FAILED, reason="dial_failed",
+                                  outcome="failed")
             return error("dial_failed")
         store.update_call(iid, provider_sid=ccid)
         if store.hangup_requested(iid):  # the user hung up while we were dialing
@@ -375,10 +384,7 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
         q = store.get_question(question_id) if _ID_RE.match(question_id) else None
         if q is None or q["call_id"] != row["internal_id"]:
             return error("not_found")
-        try:
-            body = await request.json()
-        except ValueError:
-            body = None
+        body = await _json(request)
         status = body.get("status") if isinstance(body, dict) else None
         text = body.get("answer") if isinstance(body, dict) else None
         if status not in ("answered", "declined") or (
@@ -426,8 +432,15 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
         ccid = str(p.get("call_control_id") or "")
         if call.get("provider_sid") and ccid and ccid != call["provider_sid"]:
             return JSONResponse({"ok": True, "result": "ignored"})
+        if ccid and not call.get("provider_sid"):  # the dial response was lost or is late
+            store.update_call(iid, provider_sid=ccid)
         store.add_event(iid, "carrier_event", {"type": etype[:64]})
         now = clock()
+        ended = call["state"] in states.TERMINAL or call.get("hangup_requested_at") is not None
+        if ended and etype != "call.hangup" and iid not in sessions:
+            if ccid:
+                await carrier(ccid, "hangup")  # we wrote this call off: it must not stay live
+            return JSONResponse({"ok": True, "result": "ended"})
         if etype == "call.answered":
             ledger.stamp(iid, "answered_at", now)
             apply_status(store, iid, {"CallStatus": "in-progress", "CallSid": ccid})
@@ -543,8 +556,11 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
             return f"state_{call['state']}"
         info = start["start"]
         fmt = info.get("media_format") or {}
-        if fmt and (str(fmt.get("encoding", "")).upper() != "PCMU"
-                    or int(fmt.get("sample_rate", 8000)) != 8000):
+        try:
+            if fmt and (str(fmt.get("encoding", "")).upper() != "PCMU"
+                        or int(fmt.get("sample_rate", 8000)) != 8000):
+                return "bad_media_format"
+        except (AttributeError, TypeError, ValueError):
             return "bad_media_format"
         ccid = str(info.get("call_control_id") or "")
         if call.get("provider_sid") and ccid and ccid != call["provider_sid"]:
@@ -557,6 +573,7 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
 def _parse_cursor(cursor: str) -> tuple[int, int, float]:
     try:
         ev, tr, ts = cursor.split(".", 2)
-        return int(ev), int(tr), float(ts)
+        out = int(ev), int(tr), float(ts)
     except (ValueError, AttributeError):
         return 0, 0, 0.0
+    return out if max(out[0], out[1]) < 2**62 and math.isfinite(out[2]) else (0, 0, 0.0)
