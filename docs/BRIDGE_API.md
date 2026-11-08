@@ -27,11 +27,18 @@ credential, so no request body names a workspace. The bridge accepts two credent
 2. **Usage token** `ts_usg_<64 hex>` plus `X-TeamShift-Workspace: t-<10 hex>`. The bridge checks the
    pair with `GET <HERMES_PHONE_BRIDGE_AUTH_URL>`, sending `Authorization: Bearer <token>` and
    `x-teamshift-workspace: <name>`. `200` means valid and is cached for 10 minutes (keyed by a
-   hash of name and token); `401` is `401`; anything else, including a timeout, is
-   `503 auth_unavailable` and is not cached. Bad shapes are `401` without a lookup. With the
-   auth URL unset this path is off.
+   hash of name and token); `401` is `401` and is remembered for 60 seconds; anything else,
+   including a timeout, is `503 auth_unavailable` and is not cached. Bad shapes are `401`
+   without a lookup. The bridge makes at most 120 lookups a minute in total (`429` past that)
+   and 8 at a time (`503` when all 8 are busy). With the auth URL unset this path is off.
 
-A workspace marked `disabled` in the overrides gets `403 workspace_disabled`. A call id, question id or cursor that belongs to
+A workspace marked `disabled` in the overrides gets `403 workspace_disabled`.
+
+Rate limits, answered with `429 rate_limited`: 60 requests a minute per client address,
+counted before auth, and 60 a minute per verified workspace, counted after auth. The plugin
+polls `updates` every 2 seconds, which stays well inside that.
+
+A call id, question id or cursor that belongs to
 another workspace is answered with `404`, exactly as if it did not exist. The client never
 follows redirects, so the token is never sent to a second host.
 
@@ -72,8 +79,12 @@ approval (`phone_call`).
 ```
 
 - `business_name` (optional, top level; falls back to `brief.user_name`) is who the call is for.
-  The bridge cuts it to 80 characters, strips control characters and URLs, and speaks its own
-  disclosure first: "Hi, this is an AI assistant calling on behalf of {business_name}."
+  The bridge strips URLs, keeps only `A-Z a-z 0-9 space & ' . , -` and cuts it to 80
+  characters (the same for `brief.user_name`). When a person answers, the carrier's own speech
+  plays the fixed disclosure, "Hi, this is an AI assistant calling on behalf of
+  {business_name}.", before the voice model is connected. `disclosure_spoken` is true only
+  when that playback completed; if it is cut off, the call is hung up. The voice model is told
+  the introduction was given and does not repeat it.
 - `brief` is the plugin's `voice_payload`: the only data the voice model may ever see.
   `brief.facts` holds consented facts only. The client filters it a second time just before
   sending. The goal is redacted. CVV, passwords and one-time codes are dropped even with
@@ -192,6 +203,12 @@ Secrets are read only from files in `$CREDENTIALS_DIRECTORY`, never from plain e
 `bridge_signing_key`. A missing file is logged by name; `/healthz` stays up and new calls get
 `503 not_configured`.
 
+Run one process: at startup it hangs up and fails every call an earlier process left live
+(`bridge_restart`). Every 30 seconds it does the same for calls older than their duration cap
+plus ring time plus 30 seconds (`stale_call`), and when a media stream drops it hangs up at the
+carrier. Once a day it deletes events and media tokens older than 30 days, and transcripts
+older than their retention.
+
 | Env | Meaning |
 |---|---|
 | `HERMES_PHONE_BRIDGE_PUBLIC_URL` (alias `PUBLIC_BASE_URL`) | Public base URL including the prefix, used for webhook and media URLs. Required. |
@@ -200,7 +217,9 @@ Secrets are read only from files in `$CREDENTIALS_DIRECTORY`, never from plain e
 | `HERMES_PHONE_BRIDGE_OVERRIDES` | Optional JSON object, or a path to one: `{"<workspace>": {"daily_cap": 10, "timezone": "America/New_York", "disabled": true}}`. Defaults are 10 calls a day and America/New_York. A bad file refuses new calls. |
 | `HERMES_PHONE_ALLOW_ALL` | Off by default, so only allowlisted test numbers can be dialed. Production sets it to `1`. |
 | `HERMES_PHONE_BRIDGE_INBOUND` | `1` mounts the inbound callback stub (`POST /v1/telnyx/inbound`). Off by default; otherwise the bridge handles only webhooks for calls it placed. |
-| `HERMES_PHONE_DB_PATH`, `HERMES_PHONE_MODEL`, `HERMES_PHONE_VOICE`, `HERMES_PHONE_STORE_TRANSCRIPTS`, `HERMES_PHONE_TELEPHONY_USD_PER_MIN`, `HERMES_PHONE_VOICE_USD_PER_MIN` | Optional tuning. |
+| `HERMES_PHONE_BRIDGE_TRUST_PROXY` | On by default: the client address for rate limits is the first `X-Forwarded-For` entry, which the gate overwrites with one real address. The bridge listens on loopback only. `0` uses the socket address. |
+| `HERMES_PHONE_STORE_TRANSCRIPTS` | `0` stores none, `1` (default) keeps them 30 days, a number `N` of 2 or more keeps them `N` days. |
+| `HERMES_PHONE_DB_PATH`, `HERMES_PHONE_MODEL`, `HERMES_PHONE_VOICE`, `HERMES_PHONE_TELEPHONY_USD_PER_MIN`, `HERMES_PHONE_VOICE_USD_PER_MIN` | Optional tuning. |
 
 Routes, all also under `/bridge/phone`: `GET /healthz`, `GET /v1/health`,
 `PUT /v1/calls/{call_id}`, `GET /v1/calls/{call_id}/updates`,

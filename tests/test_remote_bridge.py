@@ -100,7 +100,7 @@ def rsvc(store, ctx, bridge):
            "HERMES_PHONE_BRIDGE_TOKEN": TOKEN}
     service = tools.configure(ctx=ctx, store=store, environ=env)
     service.watch_poll_s = 0.02
-    assert service.dialer.poll_s == 1.0  # remote default
+    assert service.dialer.poll_s == 2.0  # remote default: stays under the bridge rate limit
     service.dialer.poll_s = 0.02
     yield service
     for w in list(service.watchers.values()):

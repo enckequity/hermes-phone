@@ -34,6 +34,15 @@ def _read_creds(directory: str) -> dict[str, str]:
     return out
 
 
+def _keep_days(raw: str | None) -> int:
+    """HERMES_PHONE_STORE_TRANSCRIPTS: ``0`` off, ``1`` on for 30 days, ``N`` (>= 2) N days."""
+    try:
+        n = int((raw or "").strip())
+    except ValueError:
+        return 30
+    return n if n >= 2 else 30
+
+
 def _rate(raw: str | None) -> float:
     try:
         return max(0.0, float(raw or 0))
@@ -71,6 +80,8 @@ class BridgeSettings:
     overrides_raw: str = ""  # HERMES_PHONE_BRIDGE_OVERRIDES: JSON object or a path to one
     inbound_enabled: bool = False  # HERMES_PHONE_BRIDGE_INBOUND=1 mounts the inbound stub
     auth_timeout_s: float = 5.0
+    trust_proxy: bool = False  # client IP from the first X-Forwarded-For entry (the gate's)
+    transcript_retention_days: int = 30
     telnyx_api_key: str = ""
     telnyx_connection_id: str = ""
     telnyx_public_key: str = ""  # base64 Ed25519 key that signs webhooks
@@ -132,6 +143,9 @@ class BridgeSettings:
             port=SHARED_PORT,
             store_transcripts=(env.get("HERMES_PHONE_STORE_TRANSCRIPTS", "1").strip().lower()
                                not in ("0", "false", "no", "off")),
+            transcript_retention_days=_keep_days(env.get("HERMES_PHONE_STORE_TRANSCRIPTS")),
+            # it listens on loopback only, so the forwarded address can only come from the gate
+            trust_proxy=(env.get("HERMES_PHONE_BRIDGE_TRUST_PROXY") or "1").strip() != "0",
             environ={k: env[k] for k in (ALLOWLIST_ENV, ALLOW_ALL_ENV) if k in env},
         )
 

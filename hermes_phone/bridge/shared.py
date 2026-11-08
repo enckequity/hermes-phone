@@ -8,6 +8,8 @@ not the proxy strips it. Writes go only to the SQLite file (default ``/data``).
 """
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 
 from starlette.applications import Starlette
@@ -26,4 +28,14 @@ def create_app() -> Starlette:
     if missing:  # names only, never values; /healthz stays up and new calls get 503
         log.warning("phone bridge missing config (calls refused): %s", ", ".join(missing))
     inner = appmod.create_app(settings)
-    return Starlette(routes=[Mount(PREFIX, app=inner), Mount("/", app=inner)])
+
+    @contextlib.asynccontextmanager
+    async def lifespan(_app: Starlette):  # mounted apps get no lifespan: run the sweeps here
+        task = asyncio.create_task(inner.state.sweeper())
+        try:
+            yield
+        finally:
+            task.cancel()
+
+    return Starlette(routes=[Mount(PREFIX, app=inner), Mount("/", app=inner)],
+                     lifespan=lifespan)

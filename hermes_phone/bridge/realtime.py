@@ -116,11 +116,7 @@ def build_instructions(payload: dict) -> str:
         f"YOU ARE CALLING: {payload['callee_name']}",
         f"WHAT YOU ARE CALLING FOR: {payload['goal']}",
         f"FACTS YOU MAY SHARE (only these): {facts}",
-        f"OPENING LINE: when told to open the call, say exactly: \"{payload['opening_line']}\" "
-        "(once only, never repeat it), then one natural first-person sentence about what you are "
-        "calling for, and wait for a reply. Speak as a person making a request would. Never "
-        "repeat the introduction: if the callee only says hello again or did not hear you, "
-        "rephrase just the request in one short sentence.",
+        _opening_rule(payload["opening_line"]),
         "HARD RULES:",
         "1. You are an AI. If anyone asks whether you are a person, a robot or an AI, say "
         "clearly that you are an AI assistant. Never claim to be human.",
@@ -165,7 +161,27 @@ def build_instructions(payload: dict) -> str:
     return "\n".join(lines)
 
 
+def _opening_rule(opening_line: str) -> str:
+    if not opening_line:  # the disclosure was already played to the callee before you joined
+        return ("OPENING: a recorded message already told the callee that you are an AI "
+                "assistant and who you are calling for. Never repeat that introduction or greet "
+                "again. When told to open the call, say one natural first-person sentence about "
+                "what you are calling for, and wait for a reply. If the callee only says hello "
+                "again or did not hear you, rephrase just the request in one short sentence.")
+    return (f"OPENING LINE: when told to open the call, say exactly: \"{opening_line}\" "
+            "(once only, never repeat it), then one natural first-person sentence about what you "
+            "are calling for, and wait for a reply. Speak as a person making a request would. "
+            "Never repeat the introduction: if the callee only says hello again or did not hear "
+            "you, rephrase just the request in one short sentence.")
+
+
 def opening_response_instructions(opening_line: str) -> str:
+    if not opening_line:
+        return ("The callee has heard the recorded introduction. Now, in ONE short natural "
+                "sentence in the first person, say what you are calling for, using the details "
+                "you were given (for example: \"I'd like to book a table for two tonight at "
+                "8 pm.\"). Do not greet, introduce yourself or say you are an assistant again. "
+                "Then stop and wait for the reply.")
     return ("The callee has just greeted you (or picked up silently). Now say exactly this, word "
             f"for word, as your very first words: \"{opening_line}\" Then, in ONE short natural "
             "sentence in the first person, say what you are calling for, using the details "

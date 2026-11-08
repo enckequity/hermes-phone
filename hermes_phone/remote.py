@@ -27,7 +27,7 @@ log = logging.getLogger(__name__)
 
 API = "/v1"
 TIMEOUT_S = 10.0
-POLL_S = 1.0  # watcher interval for remote calls
+POLL_S = 2.0  # watcher interval for remote calls (bridge allows 60 requests a minute)
 SID_PREFIX = "bridge-"  # provider_sid of every remote call (results.py shows bridge cost only)
 UNREACHABLE_FAIL_S = 120.0  # bridge silent this long during a live call: fail it locally
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")

@@ -16,6 +16,7 @@ import hmac
 import json
 import logging
 import re
+import threading
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -33,6 +34,8 @@ USAGE_WORKSPACE_RE = re.compile(r"^t-[0-9a-f]{10}$")
 USAGE_PREFIX = "ts_usg_"
 WORKSPACE_HEADER = "x-teamshift-workspace"
 CACHE_TTL_S = 600.0
+DENY_TTL_S = 60.0  # a refused usage token is not re-checked for a minute
+AUTH_GETS_PER_MIN = 120  # global budget of auth-service lookups
 DEFAULT_DAILY_CAP = 10
 DEFAULT_TZ = "America/New_York"
 
@@ -42,6 +45,28 @@ class Workspace:
     name: str
     daily_cap: int = DEFAULT_DAILY_CAP
     tz: str = DEFAULT_TZ
+
+
+class Window:
+    """Fixed one-minute counters per key: ``hit`` is False once ``limit`` is used up."""
+
+    def __init__(self, limit: int, clock: Callable[[], float], period: float = 60.0) -> None:
+        self.limit, self.clock, self.period = limit, clock, period
+        self._seen: dict[str, tuple[float, int]] = {}
+        self._lock = threading.Lock()
+
+    def hit(self, key: str) -> bool:
+        now = self.clock()
+        start = now - now % self.period
+        with self._lock:
+            w, n = self._seen.get(key, (start, 0))
+            n = n if w == start else 0
+            if n >= self.limit:
+                return False
+            if len(self._seen) > 10000:  # bound memory: keep only this window's keys
+                self._seen = {k: v for k, v in self._seen.items() if v[0] == start}
+            self._seen[key] = (start, n + 1)
+            return True
 
 
 def _sig(key: str, workspace: str, context: str) -> str:
@@ -109,11 +134,14 @@ class Authenticator:
         self.clock = clock
         self.timeout_s = timeout_s
         self.http_get = http_get or default_http_get
-        self._cache: dict[str, float] = {}  # sha256(name, token) -> expiry; successes only
+        self._cache: dict[str, float] = {}  # sha256(name, token) -> expiry, successes
+        self._denied: dict[str, float] = {}  # same key -> expiry, 401s
+        self.budget = Window(AUTH_GETS_PER_MIN, clock)
 
     def check(self, authorization: str, workspace_header: str) -> tuple[Workspace | None, str]:
         """``(workspace, "")`` or ``(None, code)`` with code ``unauthorized``,
-        ``workspace_disabled`` or ``auth_unavailable``. Blocking (may call the auth service)."""
+        ``workspace_disabled``, ``auth_unavailable`` or ``rate_limited``. Blocking (may call
+        the auth service)."""
         if not authorization.lower().startswith("bearer "):
             return None, "unauthorized"
         token = authorization[7:].strip()
@@ -138,6 +166,10 @@ class Authenticator:
         now = self.clock()
         if self._cache.get(key, 0) > now:
             return name, ""
+        if self._denied.get(key, 0) > now:
+            return None, "unauthorized"
+        if not self.budget.hit("auth"):
+            return None, "rate_limited"
         status = self.http_get(self.auth_url, {"Authorization": f"Bearer {token}",
                                                "x-teamshift-workspace": name,
                                                "Accept": "application/json"}, self.timeout_s)
@@ -147,6 +179,9 @@ class Authenticator:
             self._cache[key] = now + CACHE_TTL_S
             return name, ""
         if status == 401:
+            if len(self._denied) > 10000:
+                self._denied = {k: v for k, v in self._denied.items() if v > now}
+            self._denied[key] = now + DENY_TTL_S
             return None, "unauthorized"
         log.warning("workspace auth service unavailable (status %s)", status or "none")
         return None, "auth_unavailable"  # fail closed, never cached

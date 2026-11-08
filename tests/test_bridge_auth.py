@@ -63,6 +63,10 @@ def test_usage_token_401_5xx_timeout_not_cached(fake):
     a = authn(fake.url, now, timeout_s=0.2)
     fake.status = 401
     assert a.check(f"Bearer {TOK}", WS) == (None, "unauthorized")
+    fake.status = 200
+    assert a.check(f"Bearer {TOK}", WS) == (None, "unauthorized")  # 401 negative-cached
+    assert len(fake.requests) == 1
+    now[0] += auth.DENY_TTL_S + 1
     fake.status = 503
     assert a.check(f"Bearer {TOK}", WS) == (None, "auth_unavailable")
     fake.status, fake.delay = 200, 1.0

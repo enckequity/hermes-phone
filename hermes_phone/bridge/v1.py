@@ -17,6 +17,7 @@ import math
 import re
 import secrets
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from typing import Any
 
@@ -40,9 +41,16 @@ BUSINESS_MAX = 80
 _URL_RE = re.compile(r"(?i)\b(?:[a-z][a-z0-9+.-]*://\S*|www\.\S*|[\w-]+(?:\.[\w-]+)*"
                      r"\.(?:com|net|org|io|ai|co|app|dev|biz|info|us|me|xyz|link|ly)\b\S*)")
 _CTRL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2066-\u2069]")
+_NAME_DROP_RE = re.compile(r"[^A-Za-z0-9 &'.,-]")  # spoken and prompted names: allowlist only
 CALL_OK_STATES = frozenset({states.DIALING, states.RINGING, states.IN_PROGRESS})
 DURATION_MARGIN_S = 60  # carrier-side time limit = our cap + this, as a backstop only
 PAGE = 500
+CLIENT_PER_MIN = 60  # per client IP, before auth
+WORKSPACE_PER_MIN = 60  # per verified workspace, after auth
+AUTH_WORKERS = 8  # concurrent usage-token lookups; more get 503
+SWEEP_S = 30.0
+REAP_MARGIN_S = 30
+RETENTION_S = 30 * 86400
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _APPROVAL_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 _VENDOR_RE = re.compile(r"twilio|telnyx|openai|realtime|linq|hermes|gpt", re.I)
@@ -52,6 +60,7 @@ ERRORS: dict[str, tuple[int, str]] = {
     "bad_signature": (403, "Invalid signature."),
     "workspace_disabled": (403, "Calling is turned off for this workspace."),
     "auth_unavailable": (503, "Sign-in check is unavailable. Try again shortly."),
+    "rate_limited": (429, "Too many requests. Try again shortly."),
     "not_found": (404, "Not found."),
     "bad_request": (400, "The request is not valid."),
     "approval_required": (403, "A consumed, unexpired approval is required."),
@@ -81,12 +90,14 @@ CREATE TABLE IF NOT EXISTS bridge_calls (
   media_started_at REAL,
   ended_at REAL,
   stream_requested_at REAL,
+  disclosure_requested_at REAL,
   UNIQUE(workspace, call_id),
   UNIQUE(workspace, approval_id)
 );
 CREATE INDEX IF NOT EXISTS idx_bridge_calls_ws ON bridge_calls(workspace, created_at);
 """
-_LEDGER_COLUMNS = {"answered_at", "media_started_at", "ended_at", "stream_requested_at"}
+_LEDGER_COLUMNS = {"answered_at", "media_started_at", "ended_at", "stream_requested_at",
+                   "disclosure_requested_at"}
 
 
 def error(code: str) -> JSONResponse:
@@ -100,10 +111,10 @@ def disclosure(business_name: str, record: bool = False) -> str:
 
 
 def business_name(raw: Any) -> str:
-    """Workspace-attested name the disclosure speaks: no control characters or URLs, <= 80."""
+    """Workspace-attested name the disclosure speaks: no URLs, only [A-Za-z0-9 &'.,-], <= 80."""
     if not isinstance(raw, str):
         return ""
-    text = _URL_RE.sub(" ", _CTRL_RE.sub(" ", raw))
+    text = _NAME_DROP_RE.sub(" ", _URL_RE.sub(" ", _CTRL_RE.sub(" ", raw)))
     return " ".join(text.split())[:BUSINESS_MAX].strip()
 
 
@@ -203,12 +214,41 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
     app.state.authenticator = authn
     ledger = Ledger(store)
     app.state.ledger = ledger
+    # Separate pools: a slow auth service can never delay a dial or a hangup.
+    auth_pool = ThreadPoolExecutor(AUTH_WORKERS, thread_name_prefix="bridge-auth")
+    carrier_pool = ThreadPoolExecutor(8, thread_name_prefix="bridge-carrier")
+    auth_slots = asyncio.Semaphore(AUTH_WORKERS)
+    by_client = auth.Window(CLIENT_PER_MIN, clock)
+    by_workspace = auth.Window(WORKSPACE_PER_MIN, clock)
+
+    def client_ip(request: Request) -> str:
+        if settings.trust_proxy:
+            first = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+            if first:
+                return first
+        return request.client.host if request.client else ""
 
     async def tenant_of(request: Request) -> tuple[auth.Workspace | None, Response | None]:
-        ws, code = await asyncio.to_thread(
-            authn.check, request.headers.get("authorization") or "",
-            request.headers.get(auth.WORKSPACE_HEADER) or "")
-        return (ws, None) if ws is not None else (None, error(code))
+        if not by_client.hit(client_ip(request)):
+            return None, error("rate_limited")
+        authz = request.headers.get("authorization") or ""
+        claimed = request.headers.get(auth.WORKSPACE_HEADER) or ""
+        if authz.partition(" ")[2].strip().startswith(auth.USAGE_PREFIX):  # network lookup
+            if auth_slots.locked():
+                return None, error("auth_unavailable")
+            async with auth_slots:
+                ws, code = await asyncio.get_running_loop().run_in_executor(
+                    auth_pool, authn.check, authz, claimed)
+        else:
+            ws, code = authn.check(authz, claimed)  # HMAC: no I/O
+        if ws is None:
+            return None, error(code)
+        if not by_workspace.hit(ws.name):  # keyed on the verified name, never the claimed one
+            return None, error("rate_limited")
+        return ws, None
+
+    async def in_carrier_pool(fn: Callable[..., Any], *args: Any) -> Any:
+        return await asyncio.get_running_loop().run_in_executor(carrier_pool, fn, *args)
 
     def not_ready() -> bool:
         return bool(config_error or settings.missing_env())
@@ -224,11 +264,17 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
 
     async def carrier(ccid: str, name: str, body: dict | None = None) -> bool:
         try:
-            await asyncio.to_thread(telnyx_io.action, telnyx, ccid, name, body)
+            await in_carrier_pool(telnyx_io.action, telnyx, ccid, name, body)
             return True
         except Exception as exc:  # noqa: BLE001
             log.warning("call action %s failed: %s", name, exc)
             return False
+
+    def quiet_hangup(ccid: str) -> None:
+        try:
+            telnyx_io.action(telnyx, ccid, "hangup", None)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("call action hangup failed: %s", exc)
 
     def verified(body: bytes, request: Request) -> dict | None:
         if not telnyx_io.verify_signature(settings.telnyx_public_key, body, request.headers,
@@ -288,7 +334,7 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
                                   from_=settings.caller_number, webhook_url=hook,
                                   time_limit_s=max_d + DURATION_MARGIN_S)
         try:
-            data = await asyncio.to_thread(telnyx.post, "/calls", req)
+            data = await in_carrier_pool(telnyx.post, "/calls", req)
             ccid = str(data["data"]["call_control_id"])
         except Exception as exc:  # noqa: BLE001 - never redialed
             log.warning("dial failed: %s", exc)
@@ -476,7 +522,17 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
         elif etype in telnyx_io.GREETING_EVENTS:
             fresh = store.get_call(iid)
             if fresh and fresh["state"] == states.VOICEMAIL and _leaves(fresh):
+                await _disclose(iid, ccid)
+        elif etype == "call.speak.ended":
+            if str(p.get("status") or "") == "completed":
+                store.set_disclosure(iid, True)  # only a fully played disclosure counts
                 await _start_stream(iid, ccid)
+            else:  # cut off: the voice model never talks to someone who was not told
+                store.add_event(iid, "disclosure_incomplete", {})
+                await carrier(ccid, "hangup")
+        elif etype == "streaming.stopped" and iid in sessions:
+            sessions[iid].notify_stream_lost()
+            await carrier(ccid, "hangup")
         elif etype == "call.hangup":
             ledger.stamp(iid, "ended_at", now)
             fresh = ledger.by_internal(iid) or row
@@ -497,7 +553,17 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
             if not (_leaves(call) and result in telnyx_io.MACHINE_RESULTS):
                 await carrier(ccid, "hangup")  # no message: matches upstream voicemail behavior
             return  # leaving a message: the stream starts once the greeting ended
-        await _start_stream(iid, ccid)  # a person (or cannot tell): go to media
+        await _disclose(iid, ccid)  # a person (or cannot tell): disclosure, then media
+
+    async def _disclose(iid: str, ccid: str) -> None:
+        """Play the fixed disclosure with the carrier's own speech before any model audio."""
+        if not ledger.stamp(iid, "disclosure_requested_at", clock()):
+            return  # duplicate webhook
+        line = store.get_call(iid)["brief"]["opening_line"]
+        if not await carrier(ccid, "speak", {"payload": line, "voice": "female",
+                                             "language": "en-US"}):
+            store.add_event(iid, "disclosure_failed", {})
+            await carrier(ccid, "hangup")
 
     async def _start_stream(iid: str, ccid: str) -> None:
         if not ledger.stamp(iid, "stream_requested_at", clock()):
@@ -537,11 +603,17 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
     async def media(ws: WebSocket, iid: str) -> None:
         from .app import _await_start, _close  # lazy: app imports this module
 
-        await ws.accept()
         token = ws.query_params.get("token") or ""
-        start = await _await_start(ws, settings.start_timeout_s)
         row = ledger.by_internal(iid) if _ID_RE.match(iid) else None
-        reason = _media_refusal(row, iid, start, token)
+        if row is None or not token or len(token) > 200 or not store.consume_media_token(
+                iid, token):  # refused before the socket is accepted
+            if row is not None:
+                store.add_event(iid, "media_refused", {"reason": "bad_token"})
+            await _close(ws, 1008)
+            return
+        await ws.accept()
+        start = await _await_start(ws, settings.start_timeout_s)
+        reason = _media_refusal(row, iid, start)
         if reason:
             if row is not None:
                 store.add_event(iid, "media_refused", {"reason": reason})
@@ -562,7 +634,7 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
         session = CallSession(ws=telnyx_io.MediaSocket(ws), call=call, store=store,
                               settings=per_call, connect=connect,
                               twilio_client_factory=lambda: telnyx_io.Hangup(telnyx),
-                              clock=clock)
+                              clock=clock, disclosed=bool(call.get("disclosure_spoken")))
         if call["state"] == states.VOICEMAIL:
             session.notify_voicemail("machine_end_beep")  # stream began after the greeting
         sessions[iid] = session
@@ -571,9 +643,11 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
                                "callSid": ccid})
         finally:
             sessions.pop(iid, None)
+            if ccid:  # a dropped stream must not leave the line open (hangup is idempotent);
+                carrier_pool.submit(quiet_hangup, ccid)  # submitted, so even cancellation sends it
             await _close(ws, 1000)
 
-    def _media_refusal(row: dict | None, iid: str, start: dict | None, token: str) -> str:
+    def _media_refusal(row: dict | None, iid: str, start: dict | None) -> str:
         if row is None:
             return "unknown_call"
         if not start or not isinstance(start.get("start"), dict):
@@ -595,9 +669,70 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
         ccid = str(info.get("call_control_id") or "")
         if call.get("provider_sid") and ccid and ccid != call["provider_sid"]:
             return "call_mismatch"
-        if not token or len(token) > 200 or not store.consume_media_token(iid, token):
-            return "bad_token"
         return ""
+
+    # ---- sweeps -----------------------------------------------------------------------
+    def reap(*, restart: bool = False) -> int:
+        """End live calls nobody is driving: all of them after a restart, otherwise those past
+        cap + ring time + margin. Hangs up at the carrier and marks them failed."""
+        now = clock()
+        live = sorted(states.ACTIVE)
+        rows = store._all(
+            "SELECT b.internal_id, b.created_at FROM bridge_calls b JOIN calls c ON "
+            f"c.id=b.internal_id WHERE c.state IN ({','.join('?' * len(live))})", tuple(live))
+        n = 0
+        for r in rows:
+            iid = r["internal_id"]
+            call = store.get_call(iid)
+            limit = int(call["brief"]["limits"]["max_duration_s"])
+            if not restart and now < (r["created_at"] + limit + telnyx_io.DIAL_TIMEOUT_S
+                                      + REAP_MARGIN_S):
+                continue
+            reason = "bridge_restart" if restart else "stale_call"
+            if call.get("provider_sid"):
+                try:
+                    telnyx_io.action(telnyx, call["provider_sid"], "hangup", None)
+                except Exception as exc:  # noqa: BLE001 - mark it anyway: never stuck active
+                    log.warning("reaper hangup failed: %s", exc)
+            store.set_result_once(iid, {"outcome": "failed", "reason": reason,
+                                        "summary": "The call was interrupted."}, "failed")
+            fresh = store.get_call(iid)
+            if states.can_transition(fresh["state"], states.FAILED):
+                states.transition(store, iid, states.FAILED, reason=reason, outcome="failed")
+            elif states.can_transition(fresh["state"], states.ABORTED):  # approved, never dialed
+                states.transition(store, iid, states.ABORTED, reason=reason)
+            ledger.stamp(iid, "ended_at", now)
+            n += 1
+        return n
+
+    def retention() -> None:
+        """Daily: carrier/other events, media tokens and transcripts older than their keep."""
+        now = clock()
+        keep_tr = (settings.transcript_retention_days * 86400 if settings.store_transcripts
+                   else RETENTION_S)
+        ids = "SELECT internal_id FROM bridge_calls"
+        store._exec(f"DELETE FROM events WHERE ts<? AND call_id IN ({ids})", (now - RETENTION_S,))
+        store._exec(f"DELETE FROM media_tokens WHERE created_at<? AND call_id IN ({ids})",
+                    (now - RETENTION_S,))
+        store._exec(f"DELETE FROM transcripts WHERE ts<? AND call_id IN ({ids})",
+                    (now - keep_tr,))
+
+    async def sweeper() -> None:
+        last_retention = -math.inf
+        while True:
+            try:
+                await in_carrier_pool(lambda: reap())
+                if clock() - last_retention >= 86400:
+                    last_retention = clock()
+                    retention()
+            except Exception:  # noqa: BLE001 - keep sweeping
+                log.exception("bridge sweep failed")
+            await asyncio.sleep(SWEEP_S)
+
+    app.state.reap, app.state.retention, app.state.sweeper = reap, retention, sweeper
+    restarted = reap(restart=True)  # nothing from before this process is being driven
+    if restarted:
+        log.warning("ended %d calls left live by a previous bridge process", restarted)
 
 
 def _parse_cursor(cursor: str) -> tuple[int, int, float]:

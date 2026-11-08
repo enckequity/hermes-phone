@@ -9,7 +9,7 @@ import asyncio
 import base64
 import json
 import logging
-import uuid
+import secrets
 from collections import deque
 from collections.abc import Callable
 from typing import Any
@@ -29,7 +29,7 @@ MAX_Q_LEN = 500
 class CallSession:
     def __init__(self, *, ws: Any, call: dict, store: Store, settings: BridgeSettings,
                  connect: rt.RealtimeConnect, twilio_client_factory: Callable[[], Any],
-                 clock: Callable[[], float]) -> None:
+                 clock: Callable[[], float], disclosed: bool = False) -> None:
         self.ws = ws  # object with receive_text() / send_text()
         self.call = call
         self.call_id: str = call["id"]
@@ -45,6 +45,8 @@ class CallSession:
         self.started_at = clock()
         self.max_duration_s = int(call["brief"]["limits"]["max_duration_s"])
         self.payload = briefmod.voice_payload(call, store.consents(self.call_id))
+        if disclosed:  # the carrier already played the disclosure: the model must not repeat it
+            self.payload = {**self.payload, "opening_line": ""}
         # playback tracking (barge-in)
         self.latest_media_ts = 0
         self.item_id = ""
@@ -53,7 +55,7 @@ class CallSession:
         self.marks: set[str] = set()
         self._mark_n = 0
         self.response_active = False
-        self._disclosure_checked = False
+        self._disclosure_checked = disclosed  # already recorded from the carrier's playback
         self._opening_sent = False  # the forced opening response goes out exactly once
         self._opening_sent_at = 0.0
         self._opening_resp = ""  # id of the opening response, once the server created it
@@ -81,6 +83,9 @@ class CallSession:
     # ---- public --------------------------------------------------------------------------
     def notify_voicemail(self, answered_by: str) -> None:
         self._inbox.append(("voicemail", answered_by))
+
+    def notify_stream_lost(self) -> None:
+        self._inbox.append(("stream_lost", ""))
 
     async def run(self, start: dict) -> None:
         self.stream_sid = start.get("streamSid", "")
@@ -352,7 +357,7 @@ class CallSession:
         suggested = str(args.get("suggested_answer") or "").strip()[:MAX_Q_LEN]
         if needs_consent or (suggested and consent.text_fields(suggested, granted)):
             suggested = ""  # a sensitive value is never suggested without consent
-        qid = "q" + uuid.uuid4().hex[:8]
+        qid = "q" + secrets.token_hex(12)
         self.store.add_question(qid, self.call_id, question, field, suggested,
                                kind="consent" if needs_consent else "question",
                                consent_field=sensitive or "" if needs_consent else "")
@@ -486,6 +491,10 @@ class CallSession:
                 kind, value = self._inbox.popleft()
                 if kind == "voicemail":
                     await self._on_voicemail(value)
+                elif kind == "stream_lost":
+                    await self._finish(states.FAILED, "stream_lost", "failed",
+                                       "The call audio was lost.")
+                    return
             if self.store.hangup_requested(self.call_id):
                 await self._finish(states.ABORTED, "user_hangup", "needs_followup",
                                    "The user ended the call.")
@@ -518,7 +527,7 @@ class CallSession:
         elif twilio_io.machine_message_done(answered_by) and not self.wrapup_sent:
             self.wrapup_sent = True
             step = rt.VOICEMAIL_INSTRUCTIONS
-            if not self._opening_sent:  # the stream began at the beep: disclosure goes first
+            if not self._opening_sent and self.payload["opening_line"]:  # disclosure goes first
                 self._opening_sent, self._opening_sent_at = True, self.clock()
                 step = (f"First say exactly: \"{self.payload['opening_line']}\" Then: " + step)
             await self._rt_send({"type": "response.create", "response": {
