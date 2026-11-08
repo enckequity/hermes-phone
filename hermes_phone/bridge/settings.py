@@ -1,19 +1,37 @@
-"""Bridge settings. Secrets come only from the environment; nothing here is logged."""
+"""Bridge settings. Nothing here is logged. The co-located bridge reads secrets from the
+environment; the shared bridge (``from_shared_env``) reads them from credential files."""
 from __future__ import annotations
 
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from .. import mode as modemod
 from .. import secrets as secretsmod
+from ..safety import ALLOW_ALL_ENV, ALLOWLIST_ENV
 
 DEFAULT_MODEL = "gpt-realtime-2.1"
 DEFAULT_VOICE = "marin"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 TWILIO_ENV = ("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM_NUMBER")
-TENANTS_ENV = "HERMES_PHONE_BRIDGE_TENANTS"
+SHARED_DB_PATH = "/data/phone-bridge.db"
+SHARED_PORT = 8790
+# Shared bridge secrets: one file each under $CREDENTIALS_DIRECTORY, never plain env.
+CRED_FILES = {"openai_api_key": "openai_api_key", "telnyx_api_key": "telnyx_api_key",
+              "telnyx_public_key": "telnyx_public_key", "signing_key": "bridge_signing_key"}
+
+
+def _read_creds(directory: str) -> dict[str, str]:
+    """Missing directory or file -> "" (reported by missing_env by name, never by value)."""
+    out = {}
+    for attr, fname in CRED_FILES.items():
+        try:
+            out[attr] = (Path(directory) / fname).read_text().strip() if directory else ""
+        except OSError:
+            out[attr] = ""
+    return out
 
 
 def _rate(raw: str | None) -> float:
@@ -47,7 +65,12 @@ class BridgeSettings:
     filler_every_s: float = 15.0
     closing_max_s: float = 15.0  # longest wait for the spoken callback line before hanging up
     # shared multi-tenant bridge (docs/BRIDGE_API.md), placing calls through Telnyx
-    tenants_raw: str = ""  # HERMES_PHONE_BRIDGE_TENANTS: JSON file path or inline JSON
+    shared: bool = False  # multi-tenant /v1 surface only (see shared.py)
+    signing_key: str = ""  # HMAC key for <workspace>.<sig> tokens
+    auth_url: str = ""  # HERMES_PHONE_BRIDGE_AUTH_URL: usage-token check; unset = path off
+    overrides_raw: str = ""  # HERMES_PHONE_BRIDGE_OVERRIDES: JSON object or a path to one
+    inbound_enabled: bool = False  # HERMES_PHONE_BRIDGE_INBOUND=1 mounts the inbound stub
+    auth_timeout_s: float = 5.0
     telnyx_api_key: str = ""
     telnyx_connection_id: str = ""
     telnyx_public_key: str = ""  # base64 Ed25519 key that signs webhooks
@@ -79,31 +102,51 @@ class BridgeSettings:
             port=port,
             store_transcripts=(env.get("HERMES_PHONE_STORE_TRANSCRIPTS", "1").strip().lower()
                                not in ("0", "false", "no", "off")),
-            tenants_raw=env.get(TENANTS_ENV) or "",
-            telnyx_api_key=secret("TELNYX_API_KEY"),
-            telnyx_connection_id=env.get("TELNYX_CONNECTION_ID") or "",
-            telnyx_public_key=env.get("TELNYX_PUBLIC_KEY") or "",
-            caller_number=env.get("HERMES_PHONE_CALLER_NUMBER") or "",
-            telephony_usd_per_min=_rate(env.get("HERMES_PHONE_TELEPHONY_USD_PER_MIN")),
-            voice_usd_per_min=_rate(env.get("HERMES_PHONE_VOICE_USD_PER_MIN")),
             environ={**env, **{n: secret(n) for n in secretsmod.SECRET_NAMES}},
         )
 
-    @property
-    def shared(self) -> bool:
-        """Shared multi-tenant mode (Telnyx path) is on when a tenant config is set."""
-        return bool(self.tenants_raw.strip())
+    @classmethod
+    def from_shared_env(cls, environ: Mapping[str, str] | None = None) -> BridgeSettings:
+        """Shared bridge: config from env, secrets only from $CREDENTIALS_DIRECTORY files."""
+        env = os.environ if environ is None else environ
+        creds = _read_creds(env.get("CREDENTIALS_DIRECTORY") or "")
+        public = env.get("HERMES_PHONE_BRIDGE_PUBLIC_URL") or env.get("PUBLIC_BASE_URL") or ""
+        return cls(
+            shared=True,
+            public_base_url=public.strip().rstrip("/"),
+            openai_api_key=creds["openai_api_key"],
+            telnyx_api_key=creds["telnyx_api_key"],
+            telnyx_public_key=creds["telnyx_public_key"],
+            signing_key=creds["signing_key"],
+            auth_url=(env.get("HERMES_PHONE_BRIDGE_AUTH_URL") or "").strip(),
+            overrides_raw=env.get("HERMES_PHONE_BRIDGE_OVERRIDES") or "",
+            inbound_enabled=(env.get("HERMES_PHONE_BRIDGE_INBOUND") or "").strip() == "1",
+            telnyx_connection_id=env.get("TELNYX_CONNECTION_ID") or "",
+            caller_number=env.get("HERMES_PHONE_CALLER_NUMBER") or "",
+            telephony_usd_per_min=_rate(env.get("HERMES_PHONE_TELEPHONY_USD_PER_MIN")),
+            voice_usd_per_min=_rate(env.get("HERMES_PHONE_VOICE_USD_PER_MIN")),
+            model=env.get("HERMES_PHONE_MODEL") or DEFAULT_MODEL,
+            voice=env.get("HERMES_PHONE_VOICE") or DEFAULT_VOICE,
+            db_path=env.get("HERMES_PHONE_DB_PATH") or SHARED_DB_PATH,
+            host=env.get("HERMES_PHONE_BRIDGE_HOST") or DEFAULT_HOST,
+            port=SHARED_PORT,
+            store_transcripts=(env.get("HERMES_PHONE_STORE_TRANSCRIPTS", "1").strip().lower()
+                               not in ("0", "false", "no", "off")),
+            environ={k: env[k] for k in (ALLOWLIST_ENV, ALLOW_ALL_ENV) if k in env},
+        )
 
     def missing_env(self) -> list[str]:
         """Names (never values) of required env vars that are unset."""
         if self.shared:
-            shared = {"TELNYX_API_KEY": self.telnyx_api_key,
-                      "TELNYX_CONNECTION_ID": self.telnyx_connection_id,
-                      "TELNYX_PUBLIC_KEY": self.telnyx_public_key,
-                      "HERMES_PHONE_CALLER_NUMBER": self.caller_number,
-                      "OPENAI_API_KEY": self.openai_api_key,
-                      "PUBLIC_BASE_URL": self.public_base_url}
-            return [k for k, v in shared.items() if not v]
+            need = {"credential telnyx_api_key": self.telnyx_api_key,
+                    "credential telnyx_public_key": self.telnyx_public_key,
+                    "credential openai_api_key": self.openai_api_key,
+                    "credential bridge_signing_key or HERMES_PHONE_BRIDGE_AUTH_URL":
+                        self.signing_key or self.auth_url,
+                    "TELNYX_CONNECTION_ID": self.telnyx_connection_id,
+                    "HERMES_PHONE_CALLER_NUMBER": self.caller_number,
+                    "HERMES_PHONE_BRIDGE_PUBLIC_URL": self.public_base_url}
+            return [k for k, v in need.items() if not v]
         pairs = {
             "TWILIO_ACCOUNT_SID": self.twilio_account_sid,
             "TWILIO_AUTH_TOKEN": self.twilio_auth_token,

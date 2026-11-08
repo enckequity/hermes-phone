@@ -26,8 +26,8 @@ from fastapi.responses import JSONResponse, Response
 from .. import brief as briefmod
 from .. import consent, safety, states
 from ..store import Store
+from . import auth, telnyx_io
 from . import realtime as rt
-from . import telnyx_io, tenants
 from .session import CallSession
 from .settings import BridgeSettings
 from .status import apply_status
@@ -35,6 +35,11 @@ from .status import apply_status
 log = logging.getLogger(__name__)
 
 DISCLOSURE = "Hi, this is an AI assistant calling on behalf of {business_name}."
+DEFAULT_BUSINESS = "a local business"
+BUSINESS_MAX = 80
+_URL_RE = re.compile(r"(?i)\b(?:[a-z][a-z0-9+.-]*://\S*|www\.\S*|[\w-]+(?:\.[\w-]+)*"
+                     r"\.(?:com|net|org|io|ai|co|app|dev|biz|info|us|me|xyz|link|ly)\b\S*)")
+_CTRL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2066-\u2069]")
 CALL_OK_STATES = frozenset({states.DIALING, states.RINGING, states.IN_PROGRESS})
 DURATION_MARGIN_S = 60  # carrier-side time limit = our cap + this, as a backstop only
 PAGE = 500
@@ -45,6 +50,8 @@ _VENDOR_RE = re.compile(r"twilio|telnyx|openai|realtime|linq|hermes|gpt", re.I)
 ERRORS: dict[str, tuple[int, str]] = {
     "unauthorized": (401, "Unknown or missing workspace credential."),
     "bad_signature": (403, "Invalid signature."),
+    "workspace_disabled": (403, "Calling is turned off for this workspace."),
+    "auth_unavailable": (503, "Sign-in check is unavailable. Try again shortly."),
     "not_found": (404, "Not found."),
     "bad_request": (400, "The request is not valid."),
     "approval_required": (403, "A consumed, unexpired approval is required."),
@@ -90,6 +97,14 @@ def error(code: str) -> JSONResponse:
 def disclosure(business_name: str, record: bool = False) -> str:
     line = DISCLOSURE.format(business_name=business_name)
     return f"{line} {briefmod.RECORDED}" if record else line
+
+
+def business_name(raw: Any) -> str:
+    """Workspace-attested name the disclosure speaks: no control characters or URLs, <= 80."""
+    if not isinstance(raw, str):
+        return ""
+    text = _URL_RE.sub(" ", _CTRL_RE.sub(" ", raw))
+    return " ".join(text.split())[:BUSINESS_MAX].strip()
 
 
 def _sha(text: str) -> str:
@@ -177,21 +192,32 @@ def usage(row: dict, call: dict, now: float, settings: BridgeSettings) -> dict:
 def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
              clock: Callable[[], float], connect: rt.RealtimeConnect, telnyx: Any,
              sessions: dict[str, CallSession]) -> None:
-    tenant_list = tenants.load(settings.tenants_raw)
+    try:
+        overrides, config_error = auth.load_overrides(settings.overrides_raw), ""
+    except ValueError as exc:
+        overrides, config_error = {}, str(exc)  # fail closed: no new calls until fixed
+        log.error("HERMES_PHONE_BRIDGE_OVERRIDES rejected: %s", exc)
+    authn = auth.Authenticator(signing_key=settings.signing_key, auth_url=settings.auth_url,
+                               overrides=overrides, clock=clock,
+                               timeout_s=settings.auth_timeout_s)
+    app.state.authenticator = authn
     ledger = Ledger(store)
     app.state.ledger = ledger
 
-    def tenant_of(request: Request) -> tenants.Tenant | None:
-        auth = request.headers.get("authorization") or ""
-        if not auth.lower().startswith("bearer "):
-            return None
-        return tenants.find(tenant_list, auth[7:].strip())
+    async def tenant_of(request: Request) -> tuple[auth.Workspace | None, Response | None]:
+        ws, code = await asyncio.to_thread(
+            authn.check, request.headers.get("authorization") or "",
+            request.headers.get(auth.WORKSPACE_HEADER) or "")
+        return (ws, None) if ws is not None else (None, error(code))
 
-    def owned(request: Request, call_id: str) -> tuple[Any, dict | None]:
-        t = tenant_of(request)
+    def not_ready() -> bool:
+        return bool(config_error or settings.missing_env())
+
+    async def owned(request: Request, call_id: str) -> tuple[Any, dict | None]:
+        t, err = await tenant_of(request)
         if t is None:
-            return error("unauthorized"), None
-        row = ledger.by_call(t.workspace, call_id) if _ID_RE.match(call_id) else None
+            return err, None
+        row = ledger.by_call(t.name, call_id) if _ID_RE.match(call_id) else None
         if row is None:
             return error("not_found"), None
         return t, row
@@ -217,18 +243,17 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
     # ---- plugin-facing API ------------------------------------------------------------
     @app.get("/v1/health")
     async def health(request: Request) -> Response:
-        if tenant_of(request) is None:
-            return error("unauthorized")
-        if settings.missing_env():
-            return error("not_configured")
-        return JSONResponse({"ok": True})
+        t, err = await tenant_of(request)
+        if t is None:
+            return err
+        return error("not_configured") if not_ready() else JSONResponse({"ok": True})
 
     @app.put("/v1/calls/{call_id}")
     async def submit(call_id: str, request: Request) -> Response:
-        t = tenant_of(request)
+        t, err = await tenant_of(request)
         if t is None:
-            return error("unauthorized")
-        if settings.missing_env():
+            return err
+        if not_ready():
             return error("not_configured")
         body = await _json(request)
         if (not isinstance(body, dict) or not _ID_RE.match(call_id)
@@ -242,7 +267,7 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
         if not isinstance(aid, str) or not _APPROVAL_RE.match(aid):
             return error("approval_required")
         with store._lock:  # check-then-create is atomic for this process
-            row = ledger.by_call(t.workspace, call_id)
+            row = ledger.by_call(t.name, call_id)
             if row is not None:  # a repeat answers even after the approval expired
                 if row["approval_id"] != aid:
                     return error("conflict")
@@ -252,7 +277,7 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
             if (not _num(consumed) or not _num(expires) or expires <= consumed
                     or now >= expires):
                 return error("approval_required")
-            if ledger.approval_used(t.workspace, aid):
+            if ledger.approval_used(t.name, aid):
                 return error("conflict")
             code, e164 = _limits(t, body.get("number"), now)
             if code:
@@ -279,7 +304,7 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
         return JSONResponse({"call_id": call_id, "state": states.DIALING,
                              "bridge_call_id": iid}, status_code=201)
 
-    def _limits(t: tenants.Tenant, number: Any, now: float) -> tuple[str, str]:
+    def _limits(t: auth.Workspace, number: Any, now: float) -> tuple[str, str]:
         e164, _ = safety.validate_number(number)
         if e164 is None:
             return "blocked_number", ""
@@ -288,16 +313,16 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
         if not safety.check_quiet_hours(e164, datetime.fromtimestamp(now, UTC),
                                         fallback_tz=t.tz).ok:
             return "quiet_hours", ""
-        if ledger.active(t.workspace):
+        if ledger.active(t.name):
             return "active_call", ""
-        if ledger.count_since(t.workspace, now - 86400) >= t.daily_cap:
+        if ledger.count_since(t.name, now - 86400) >= t.daily_cap:
             return "daily_cap", ""
-        last = ledger.last_to(t.workspace, e164)
+        last = ledger.last_to(t.name, e164)
         if last is not None and now - last < safety.MIN_GAP_SAME_NUMBER_S:
             return "redial_too_soon", ""
         return "", e164
 
-    def _create(t: tenants.Tenant, call_id: str, aid: str, e164: str, body: dict,
+    def _create(t: auth.Workspace, call_id: str, aid: str, e164: str, body: dict,
                 now: float) -> tuple[str, str, int]:
         b = body["brief"]
         lim = body.get("limits") if isinstance(body.get("limits"), dict) else {}
@@ -305,30 +330,32 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
                     briefmod.clamp_duration(b.get("max_duration_s")))
         facts = b.get("facts") if isinstance(b.get("facts"), dict) else {}
         record = bool(b.get("record"))
+        business = (business_name(body.get("business_name")) or business_name(b.get("user_name"))
+                    or DEFAULT_BUSINESS)
         stored = {
-            "opening_line": disclosure(t.business_name, record),  # the bridge's, never the plugin's
+            "opening_line": disclosure(business, record),  # the bridge's, never the plugin's
             "facts_raw": facts,
             "limits": {"max_duration_s": max_d, "recording": record,
                        "voicemail_message": bool(b.get("leave_voicemail")),
                        "question_timeout_s": briefmod.clamp_question_timeout(
                            lim.get("question_timeout_s"))},
             "language": str(b.get("language") or "en")[:16],
-            "user_name": str(b.get("user_name") or t.business_name)[:100],
+            "user_name": business_name(b.get("user_name")) or business,
         }
         iid = "b" + secrets.token_hex(12)
         secret = secrets.token_urlsafe(32)  # 43 chars
         store.create_call(iid, state=states.APPROVED,
                           callee_name=str(b.get("callee_name") or "the business")[:200],
                           number=e164, number_source="bridge", goal=str(b.get("goal") or "")[:2000],
-                          brief=stored, user_id=t.workspace)
+                          brief=stored, user_id=t.name)
         # The plugin sends consented facts only; record those consents so the voice payload
         # keeps them. Forbidden fields stay dropped by build_safe_facts.
         for key, value in facts.items():
             field = consent.field_for_fact(key, value)
             if field in consent.SENSITIVE_FIELDS:
-                store.grant_consent(iid, field, t.workspace)
+                store.grant_consent(iid, field, t.name)
         opts = body.get("options") if isinstance(body.get("options"), dict) else {}
-        ledger.insert(internal_id=iid, workspace=t.workspace, call_id=call_id, approval_id=aid,
+        ledger.insert(internal_id=iid, workspace=t.name, call_id=call_id, approval_id=aid,
                       hook_secret_hash=_sha(secret),
                       store_transcripts=0 if opts.get("store_transcripts") is False else 1,
                       created_at=now)
@@ -337,7 +364,7 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
 
     @app.get("/v1/calls/{call_id}/updates")
     async def updates(call_id: str, request: Request, cursor: str = "") -> Response:
-        t, row = owned(request, call_id)
+        t, row = await owned(request, call_id)
         if row is None:
             return t
         iid = row["internal_id"]
@@ -378,7 +405,7 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
 
     @app.post("/v1/calls/{call_id}/questions/{question_id}/answer")
     async def answer(call_id: str, question_id: str, request: Request) -> Response:
-        t, row = owned(request, call_id)
+        t, row = await owned(request, call_id)
         if row is None:
             return t
         q = store.get_question(question_id) if _ID_RE.match(question_id) else None
@@ -393,13 +420,13 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
         if q["status"] != "open":
             return error("closed")
         if status == "answered" and q.get("consent_field"):
-            store.grant_consent(q["call_id"], q["consent_field"], t.workspace)  # before resolve
+            store.grant_consent(q["call_id"], q["consent_field"], t.name)  # before resolve
         got = store.resolve_question(question_id, status, text if status == "answered" else None)
         return JSONResponse({"ok": True}) if got == status else error("closed")
 
     @app.post("/v1/calls/{call_id}/hangup")
     async def hangup(call_id: str, request: Request) -> Response:
-        t, row = owned(request, call_id)
+        t, row = await owned(request, call_id)
         if row is None:
             return t
         iid = row["internal_id"]
@@ -481,7 +508,6 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
             store.add_event(iid, "stream_failed", {})
             await carrier(ccid, "hangup")
 
-    @app.post("/v1/telnyx/inbound")
     async def inbound(request: Request) -> Response:
         data = verified(await request.body(), request)
         if data is None:
@@ -501,6 +527,10 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
         elif etype == "call.speak.ended":
             await carrier(ccid, "hangup")
         return JSONResponse({"ok": True})
+
+    # Off by default: inbound calls on our number belong to the existing voice service.
+    if settings.inbound_enabled:
+        app.add_api_route("/v1/telnyx/inbound", inbound, methods=["POST"])
 
     # ---- media ------------------------------------------------------------------------
     @app.websocket("/v1/media/{iid}")

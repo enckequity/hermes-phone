@@ -82,14 +82,16 @@ class RemoteBridge:
         if parts.scheme != "https" and not (parts.scheme == "http"
                                             and parts.hostname in _LOCAL_HOSTS):
             raise BridgeError(f"{modemod.BRIDGE_URL_ENV} must be an https URL")
-        token = (self.environ.get(modemod.BRIDGE_TOKEN_ENV) or "").strip()
+        token, workspace = modemod.remote_credentials(self.environ)
         if not token:
             raise BridgeError(f"{modemod.BRIDGE_TOKEN_ENV} is not set")
+        headers = {"Authorization": f"Bearer {token}", "Accept": "application/json",
+                   "Content-Type": "application/json", "User-Agent": "hermes-phone"}
+        if workspace:  # usage-token fallback: the bridge verifies the pair
+            headers["X-TeamShift-Workspace"] = workspace
         req = urllib.request.Request(
             base + API + path, method=method,
-            data=None if body is None else json.dumps(body).encode(),
-            headers={"Authorization": f"Bearer {token}", "Accept": "application/json",
-                     "Content-Type": "application/json", "User-Agent": "hermes-phone"})
+            data=None if body is None else json.dumps(body).encode(), headers=headers)
         try:
             with _OPENER.open(req, timeout=self.timeout_s) as resp:
                 raw = resp.read()

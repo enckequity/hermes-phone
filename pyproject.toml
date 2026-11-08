@@ -18,8 +18,10 @@ dependencies = [
   "phonenumbers>=8.13,<10",
   "tzdata>=2024.1,<2027",
   "httpx>=0.27,<1",
-  "cryptography>=42,<51",
 ]
+
+[project.optional-dependencies]
+bridge = ["cryptography>=42,<51"]  # shared bridge only (webhook signatures)
 
 [project.urls]
 Homepage = "https://github.com/winchxyz/hermes-phone"

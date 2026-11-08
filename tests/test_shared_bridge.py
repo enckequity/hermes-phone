@@ -18,11 +18,12 @@ from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from hermes_phone import states
-from hermes_phone.bridge import BridgeSettings, create_app, status, telnyx_io, tenants, v1
+from hermes_phone.bridge import BridgeSettings, auth, create_app, status, telnyx_io, v1
 from hermes_phone.bridge import realtime as rt
 
 BASE = "https://voice.example.test"
-TOKEN_A, TOKEN_B = "workspace-a-token-" + "a" * 20, "workspace-b-token-" + "b" * 20
+KEY = "test-signing-key"
+TOKEN_A, TOKEN_B = auth.mint(KEY, "wa"), auth.mint(KEY, "wb")
 VENDORS = re.compile(r"twilio|telnyx|openai|linq|hermes|photon|gpt|realtime|anthropic|claude",
                      re.I)
 ROOT = Path(__file__).resolve().parent.parent / "hermes_phone" / "bridge"
@@ -32,12 +33,9 @@ def sha(t: str) -> str:
     return hashlib.sha256(t.encode()).hexdigest()
 
 
-def tenant_config(cap_a: int = 5) -> str:
-    return json.dumps([
-        {"token_sha256": sha(TOKEN_A), "workspace": "wa", "business_name": "Acme Plumbing",
-         "daily_cap": cap_a, "tz": "America/New_York"},
-        {"token_sha256": sha(TOKEN_B), "workspace": "wb", "business_name": "Bolt Dental",
-         "daily_cap": 5, "tz": "Asia/Tokyo"}])
+def overrides(cap_a: int = 5) -> str:
+    return json.dumps({"wa": {"daily_cap": cap_a}, "wb": {"timezone": "Asia/Tokyo"},
+                       "woff": {"disabled": True}})
 
 
 class FakeTelnyx:
@@ -58,18 +56,19 @@ class FakeTelnyx:
 
 
 class Shared:
-    def __init__(self, store, clock, cap_a: int = 5) -> None:
+    def __init__(self, store, clock, cap_a: int = 5, **kw) -> None:
         self.store, self.clock = store, clock
         self.key = Ed25519PrivateKey.generate()
         pub = base64.b64encode(self.key.public_key().public_bytes(
             Encoding.Raw, PublicFormat.Raw)).decode()
         self.rt, self.tx = FakeRealtime(), FakeTelnyx()
         self.settings = BridgeSettings(
-            public_base_url=BASE, openai_api_key="sk-test", tenants_raw=tenant_config(cap_a),
+            shared=True, signing_key=KEY, overrides_raw=overrides(cap_a),
+            public_base_url=BASE, openai_api_key="sk-test",
             telnyx_api_key="KEY-test", telnyx_connection_id="conn-1", telnyx_public_key=pub,
             caller_number="+17175550100", tick_s=0.01, token_ttl_s=60.0, start_timeout_s=3.0,
             telephony_usd_per_min=0.012, voice_usd_per_min=0.06,
-            environ={"HERMES_PHONE_TEST_ALLOWLIST": f"{TEST_NUMBER},{OTHER_NUMBER}"})
+            environ={"HERMES_PHONE_TEST_ALLOWLIST": f"{TEST_NUMBER},{OTHER_NUMBER}"}, **kw)
         self.app = create_app(self.settings, store=store, realtime_connect=self.rt.connect,
                               telnyx_client=self.tx, clock=clock)
         self.client = TestClient(self.app)
@@ -83,7 +82,7 @@ class Shared:
              "facts": {"name": "Winch", "party_size": 4}, "language": "en",
              "max_duration_s": 300, "record": False, "leave_voicemail": False,
              "user_name": "Winch", **brief}
-        return {"call_id": cid, "number": number,
+        return {"call_id": cid, "number": number, "business_name": "Acme Plumbing",
                 "approval": {"id": aid or f"ap_{self._n:032x}", "approved_at": now - 10,
                              "expires_at": now + 890, "consumed_at": now - 1},
                 "brief": b, "limits": {"max_duration_s": 300, "question_timeout_s": 75},
@@ -151,13 +150,44 @@ def answered_human(sb: Shared, iid: str) -> None:
 
 
 # ---- tenancy ----------------------------------------------------------------------------
-def test_tenant_config_hashes_only_and_constant_time_lookup():
-    ts = tenants.load(tenant_config())
-    assert [t.workspace for t in ts] == ["wa", "wb"]
-    assert all(TOKEN_A not in repr(t) for t in ts)
-    assert tenants.find(ts, TOKEN_B).workspace == "wb"
-    assert tenants.find(ts, "nope") is None and tenants.find(ts, "") is None
-    assert tenants.load('[{"token_sha256": "xyz", "workspace": "w"}]') == []  # fail closed
+def test_hmac_tokens_valid_wrong_key_swapped_and_malformed(sb):
+    assert re.fullmatch(r"wa\.[A-Za-z0-9_-]{43}", TOKEN_A)  # base64url, no padding
+    assert auth.verify_hmac(KEY, TOKEN_A) == "wa"
+    assert auth.verify_hmac("other-key", TOKEN_A) is None
+    swapped = "wb." + TOKEN_A.split(".")[1]
+    assert auth.verify_hmac(KEY, swapped) is None
+    assert auth.verify_hmac(KEY, auth.mint(KEY, "wa", auth.GHOST_CONTEXT)) is None
+    for bad in (swapped, auth.mint("other-key", "wa"), "wa", "Wa." + TOKEN_A.split(".")[1],
+                TOKEN_A + ".x", ""):
+        assert sb.get("/v1/health", bad).status_code == 401
+    with pytest.raises(ValueError):
+        auth.mint(KEY, "Bad_Name")
+
+
+def test_disabled_override_refused(sb):
+    r = sb.put("c1", auth.mint(KEY, "woff"))
+    assert (r.status_code, r.json()["error"]["code"]) == (403, "workspace_disabled")
+    assert not sb.tx.posts
+
+
+def test_bad_overrides_fail_closed(store, clock):
+    sb = Shared(store, clock)
+    sb2 = Shared.__new__(Shared)
+    sb2.__dict__.update(sb.__dict__)
+    settings = BridgeSettings(**{**sb.settings.__dict__, "overrides_raw": "{not json"})
+    sb2.app = create_app(settings, store=store, realtime_connect=sb.rt.connect,
+                         telnyx_client=sb.tx, clock=clock)
+    sb2.client = TestClient(sb2.app)
+    assert sb2.get("/v1/health").json()["error"]["code"] == "not_configured"
+    assert sb2.put("c1").status_code == 503
+
+
+def test_cli_bridge_token_matches_bridge(capsys):
+    from hermes_phone import cli
+
+    assert cli.bridge_token("wa", {"HERMES_PHONE_BRIDGE_SIGNING_KEY": KEY}) == 0
+    assert capsys.readouterr().out.strip() == TOKEN_A
+    assert cli.bridge_token("wa", {}) == 2
 
 
 def test_workspace_b_gets_404_on_workspace_a_calls(sb):
@@ -466,8 +496,10 @@ def test_hangup_before_answer(sb):
     assert sb.post("/v1/calls/c1/hangup", {}).status_code == 409
 
 
-def test_inbound_callback_says_line_and_hangs_up(sb):
+def test_inbound_callback_says_line_and_hangs_up(sb, store, clock):
     path = "/v1/telnyx/inbound"
+    assert sb.signed(path, "call.initiated", call_control_id="in1").status_code == 404  # off
+    sb = Shared(store, clock, inbound_enabled=True)
     assert sb.signed(path, "call.initiated", call_control_id="in1",
                      direction="incoming").status_code == 200
     sb.signed(path, "call.answered", call_control_id="in1")

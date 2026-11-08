@@ -33,7 +33,7 @@ class FakeBridge:
             def _go(self):
                 n = int(self.headers.get("Content-Length") or 0)
                 body = json.loads(self.rfile.read(n)) if n else None
-                status, data = bridge.handle(self.command, self.path, dict(self.headers), body)
+                status, data = bridge.handle(self.command, self.path, self.headers, body)
                 raw = json.dumps(data).encode()
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
@@ -57,7 +57,8 @@ class FakeBridge:
     def handle(self, method, path, headers, body):
         url = urlsplit(path)
         self.requests.append({"method": method, "path": url.path, "query": parse_qs(url.query),
-                              "auth": headers.get("Authorization"), "body": body})
+                              "auth": headers.get("Authorization"),
+                              "ws": headers.get("X-TeamShift-Workspace"), "body": body})
         if headers.get("Authorization") != f"Bearer {TOKEN}":
             return 401, {"error": {"code": "unauthorized", "message": "bad credential"}}
         parts = url.path.split("/")[2:]  # after /v1
@@ -376,3 +377,18 @@ def test_remote_cost_comes_only_from_bridge_usage(rsvc, bridge, ctx):
     assert "$0.42" in results.result_message(rsvc.store.get_call(cid), rsvc.config)
     upstream = dict(rsvc.store.get_call(cid), provider_sid="CA1")
     assert "about $" in results.result_message(upstream, rsvc.config)  # other modes unchanged
+
+
+def test_usage_token_pair_is_the_fallback_credential(bridge):
+    base = {"HERMES_PHONE_BRIDGE_URL": bridge.url}
+    pair = {"TEAMSHIFT_USAGE_TOKEN": TOKEN, "TEAMSHIFT_WORKSPACE_NAME": "t-0123456789"}
+    assert remote.RemoteBridge({**base, **pair}, store=None).preflight() == ""
+    assert bridge.requests[-1]["ws"] == "t-0123456789"
+    both = {**base, **pair, "HERMES_PHONE_BRIDGE_TOKEN": TOKEN}
+    assert remote.RemoteBridge(both, store=None).preflight() == ""
+    assert bridge.requests[-1]["ws"] is None  # the bridge token wins; no workspace header
+    from hermes_phone import mode as modemod
+
+    assert modemod.resolve({**base, **pair}).missing == []
+    assert modemod.resolve({**base, "TEAMSHIFT_USAGE_TOKEN": TOKEN}).missing == [
+        "HERMES_PHONE_BRIDGE_TOKEN"]
