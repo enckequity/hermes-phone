@@ -67,6 +67,15 @@ def run_checks(environ: Mapping[str, str], http_get: Callable[[str, float], int]
     out: list[tuple[str, bool, str]] = []
     chosen = modemod.resolve(environ)
     out.append(("mode", True, chosen.name))
+    if chosen.name == modemod.REMOTE:  # shared bridge: only its two variables and its health
+        from .remote import RemoteBridge
+
+        for name in modemod.REMOTE_ENV:
+            ok = bool((environ.get(name) or "").strip())
+            out.append((f"env {name}", ok, "set" if ok else "MISSING"))
+        problem = RemoteBridge(environ, store=None).preflight()
+        out.append(("bridge health", not problem, "reachable" if not problem else problem))
+        return out
     needed = (modemod.WEB_ENV if chosen.name == modemod.WEB
               else (*dialer.TWILIO_ENV, "OPENAI_API_KEY"))
     for name in needed:

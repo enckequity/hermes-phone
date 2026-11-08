@@ -347,6 +347,10 @@ def hangup(svc: Any, call_id: str = "", *, wait_s: float | None = None,
             pass
     if webphone.is_web_sid(cur.get("provider_sid")):
         return f"Call {call_id} ended (hung up by you)."
+    if getattr(dialer, "remote", False):  # shared bridge: no vendor names in what users see
+        return f"Call {call_id} hung up." if ok else (
+            f"Call {call_id} is marked ended, but the phone service did not confirm the line "
+            "was dropped. Check your phone.")
     if ok:
         return f"Call {call_id} hung up through Twilio."
     return (f"Call {call_id} is marked ended, but I could not confirm the line was dropped "
@@ -405,6 +409,9 @@ class CallWatcher:
     # -- one poll; True when finished --
     def _step(self) -> bool:
         store = self.svc.store
+        sync = getattr(getattr(self.svc, "dialer", None), "sync", None)
+        if sync is not None:  # remote bridge: push answers, mirror its updates into the store
+            sync(store, self.call_id)
         call = store.get_call(self.call_id)
         if call is None:
             return True

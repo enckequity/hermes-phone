@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 PLUGIN_NAME = "hermes-phone"
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 DB_ENV = "HERMES_PHONE_DB"
 
 _SCHEMA_V1 = """
@@ -135,14 +135,18 @@ ALTER TABLE questions ADD COLUMN card_suggestion TEXT;
 CREATE INDEX IF NOT EXISTS idx_calls_origin ON calls(origin_session_id, state);
 """
 
+_SCHEMA_V7 = """
+ALTER TABLE calls ADD COLUMN bridge_cursor TEXT;
+"""
+
 _MIGRATIONS: dict[int, str] = {1: _SCHEMA_V1, 2: _SCHEMA_V2, 3: _SCHEMA_V3, 4: _SCHEMA_V4,
-                               5: _SCHEMA_V5, 6: _SCHEMA_V6}
+                               5: _SCHEMA_V5, 6: _SCHEMA_V6, 7: _SCHEMA_V7}
 
 # Columns callers may update through update_call.
 _CALL_COLUMNS = {
     "state", "approved_at", "dialed_at", "ended_at", "provider_sid", "outcome", "reason",
     "result_json", "result_delivered", "user_id", "session_id", "duration_s",
-    "hangup_requested_at", "result_posted_at",
+    "hangup_requested_at", "result_posted_at", "bridge_cursor",
 }
 
 

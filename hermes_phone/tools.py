@@ -88,6 +88,8 @@ class PhoneService:
         chosen = modemod.resolve(self.environ)
         if chosen.missing:
             kind = "null"
+        elif chosen.name == modemod.REMOTE:
+            kind = "remote"
         elif chosen.name == modemod.WEB:
             kind = "web"
         else:
@@ -95,6 +97,11 @@ class PhoneService:
         if self._dialer is None or self._dialer_kind != kind or kind == "null":
             if kind == "null":
                 self._dialer = NullDialer(configured=False, missing=chosen.missing)
+            elif kind == "remote":
+                from . import remote
+
+                self._dialer = remote.RemoteBridge(self.environ, store=self.store,
+                                                   config=self.config)
             elif kind == "web":
                 self._dialer = dialermod.WebPhoneDialer(self.environ, store=self.store)
             else:
@@ -105,7 +112,7 @@ class PhoneService:
 
     @property
     def mode(self) -> str:
-        """``twilio`` or ``web``: how calls are placed with the current environment."""
+        """``twilio``, ``web`` or ``remote``: how calls are placed with the current environment."""
         from . import mode as modemod
 
         return modemod.resolve(self.environ).name

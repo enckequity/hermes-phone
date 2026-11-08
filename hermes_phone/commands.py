@@ -352,7 +352,8 @@ def _cmd_check(rest: list[str], kwargs: dict) -> str:
     env = tools.get_service().environ
     chosen = modemod.resolve(env)
     how = {"explicit": "set by HERMES_PHONE_MODE", "auto": "automatic: Twilio is not "
-           "configured, OpenAI and PUBLIC_BASE_URL are", "default": "default"}[chosen.how]
+           "configured, OpenAI and PUBLIC_BASE_URL are", "default": "default",
+           "bridge": "shared bridge, HERMES_PHONE_BRIDGE_URL is set"}[chosen.how]
     lines = ["hermes-phone setup check:",
              f"- mode: {chosen.name} ({how})"
              + (f"; missing: {', '.join(chosen.missing)}" if chosen.missing else "")]
@@ -372,6 +373,8 @@ def _cmd_check(rest: list[str], kwargs: dict) -> str:
     names = ("OPENAI_API_KEY", "PUBLIC_BASE_URL") if chosen.name == modemod.WEB else (
         "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM_NUMBER", "OPENAI_API_KEY",
         "PUBLIC_BASE_URL")
+    if chosen.name == modemod.REMOTE:
+        names = modemod.REMOTE_ENV
     for name in names:
         value = (env.get(name) or "").strip()
         state = "set" if value else "MISSING"
