@@ -229,11 +229,17 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
         return request.client.host if request.client else ""
 
     async def tenant_of(request: Request) -> tuple[auth.Workspace | None, Response | None]:
-        if not by_client.hit(client_ip(request)):
-            return None, error("rate_limited")
+        # The per-IP limit counts only requests that cost work: a usage-token lookup that misses
+        # the cache, or a failed auth. Verified traffic counts against its workspace only, so
+        # workspaces sharing an egress IP cannot lock each other out.
         authz = request.headers.get("authorization") or ""
         claimed = request.headers.get(auth.WORKSPACE_HEADER) or ""
+        counted = False
         if authz.partition(" ")[2].strip().startswith(auth.USAGE_PREFIX):  # network lookup
+            if not authn.cached(authz, claimed):
+                counted = True
+                if not by_client.hit(client_ip(request)):
+                    return None, error("rate_limited")
             if auth_slots.locked():
                 return None, error("auth_unavailable")
             async with auth_slots:
@@ -242,6 +248,8 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
         else:
             ws, code = authn.check(authz, claimed)  # HMAC: no I/O
         if ws is None:
+            if not counted and not by_client.hit(client_ip(request)):
+                return None, error("rate_limited")
             return None, error(code)
         if not by_workspace.hit(ws.name):  # keyed on the verified name, never the claimed one
             return None, error("rate_limited")

@@ -613,8 +613,8 @@ def test_per_client_ip_limit_before_auth(store, clock):
     h = {"Authorization": "Bearer bogus", "X-Forwarded-For": "203.0.113.9, 10.0.0.1"}
     codes = [sb.client.get("/v1/health", headers=h).status_code for _ in range(61)]
     assert codes[:60] == [401] * 60 and codes[60] == 429
-    ok = {"Authorization": f"Bearer {TOKEN_A}", "X-Forwarded-For": "203.0.113.10"}
-    assert sb.client.get("/v1/health", headers=ok).status_code == 200  # other client
+    ok = {"Authorization": f"Bearer {TOKEN_A}", "X-Forwarded-For": "203.0.113.9"}
+    assert sb.client.get("/v1/health", headers=ok).status_code == 200  # verified: not IP-limited
     clock.advance(60)
     assert sb.client.get("/v1/health", headers=h).status_code == 401  # new minute
 
@@ -767,3 +767,25 @@ def test_manifest_and_tool_schemas_are_white_label():
     text += [json.dumps(c) for c in m["config_schema"].values()]
     hits = [t for t in text if VENDORS.search(t) or re.search(r"ngrok|cloudflare", t, re.I)]
     assert not hits, hits
+
+
+def test_shared_egress_ip_verified_traffic_is_not_ip_limited(store, clock):
+    sb = Shared(store, clock, trust_proxy=True, auth_url="https://auth.invalid/v")
+    lookups = []
+    sb.app.state.authenticator.http_get = lambda *a: lookups.append(a) or 200
+    ip = {"X-Forwarded-For": "203.0.113.50"}
+    usage = {**ip, "Authorization": "Bearer ts_usg_" + "a" * 64,
+             "X-TeamShift-Workspace": "t-0123456789"}
+    hmac_a = {**ip, "Authorization": f"Bearer {TOKEN_A}"}
+    prime = {**usage, "X-Forwarded-For": "198.51.100.1"}  # the one lookup, from elsewhere
+    assert sb.client.get("/v1/health", headers=prime).status_code == 200
+    codes = [sb.client.get("/v1/health", headers=usage if n % 2 else hmac_a).status_code
+             for n in range(100)]
+    assert codes == [200] * 100 and len(lookups) == 1  # cache hits skip the IP limit
+    junk = [sb.client.get("/v1/health", headers={**ip, "Authorization": "Bearer junk"}
+                          ).status_code for _ in range(61)]
+    assert junk[:60] == [401] * 60 and junk[60] == 429
+    miss = {**usage, "Authorization": "Bearer ts_usg_" + "b" * 64}
+    assert sb.client.get("/v1/health", headers=miss).status_code == 429  # a lookup costs work
+    assert len(lookups) == 1
+    assert sb.client.get("/v1/health", headers=hmac_a).status_code == 200

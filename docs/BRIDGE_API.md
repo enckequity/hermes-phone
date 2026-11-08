@@ -34,8 +34,10 @@ credential, so no request body names a workspace. The bridge accepts two credent
 
 A workspace marked `disabled` in the overrides gets `403 workspace_disabled`.
 
-Rate limits, answered with `429 rate_limited`: 60 requests a minute per client address,
-counted before auth, and 60 a minute per verified workspace, counted after auth. The plugin
+Rate limits, answered with `429 rate_limited`: 60 a minute per verified workspace, and 60 a
+minute per client address counting only requests that cost work (a usage-token lookup that
+misses the cache, or a failed auth). Verified requests never count against the address, so
+workspaces sharing an egress address do not lock each other out. The plugin
 polls `updates` every 2 seconds, which stays well inside that.
 
 A call id, question id or cursor that belongs to

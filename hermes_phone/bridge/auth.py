@@ -158,11 +158,21 @@ class Authenticator:
         return Workspace(name, int(spec.get("daily_cap", DEFAULT_DAILY_CAP)),
                          str(spec.get("timezone") or DEFAULT_TZ)), ""
 
+    @staticmethod
+    def _key(name: str, token: str) -> str:
+        return hashlib.sha256(f"{name}\0{token}".encode()).hexdigest()
+
+    def cached(self, authorization: str, workspace_header: str) -> bool:
+        """True when this usage token already passed within the cache window (no lookup)."""
+        token = authorization.partition(" ")[2].strip()
+        key = self._key(workspace_header.strip(), token)
+        return self._cache.get(key, 0) > self.clock()
+
     def _usage(self, token: str, name: str) -> tuple[str | None, str]:
         if not self.auth_url or not USAGE_TOKEN_RE.match(token) or not USAGE_WORKSPACE_RE.match(
                 name):
             return None, "unauthorized"
-        key = hashlib.sha256(f"{name}\0{token}".encode()).hexdigest()
+        key = self._key(name, token)
         now = self.clock()
         if self._cache.get(key, 0) > now:
             return name, ""
