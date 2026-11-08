@@ -347,14 +347,10 @@ def hangup(svc: Any, call_id: str = "", *, wait_s: float | None = None,
             pass
     if webphone.is_web_sid(cur.get("provider_sid")):
         return f"Call {call_id} ended (hung up by you)."
-    if getattr(dialer, "remote", False):  # shared bridge: no vendor names in what users see
-        return f"Call {call_id} hung up." if ok else (
-            f"Call {call_id} is marked ended, but the phone service did not confirm the line "
-            "was dropped. Check your phone.")
     if ok:
-        return f"Call {call_id} hung up through Twilio."
-    return (f"Call {call_id} is marked ended, but I could not confirm the line was dropped "
-            "(bridge unreachable and Twilio hangup unavailable). Check your phone or Twilio.")
+        return f"Call {call_id} hung up."
+    return (f"Call {call_id} is marked ended, but the phone service did not confirm the line "
+            "was dropped. Check your phone.")
 
 
 # ---- watcher ----------------------------------------------------------------------------------
@@ -557,7 +553,8 @@ def start_watcher(svc: Any, call_id: str) -> CallWatcher | None:
         watchers = svc.watchers
         if call_id in watchers:
             return watchers[call_id]
-        watcher = CallWatcher(svc, call_id, poll_s=svc.watch_poll_s)
+        poll_s = getattr(getattr(svc, "dialer", None), "poll_s", None) or svc.watch_poll_s
+        watcher = CallWatcher(svc, call_id, poll_s=poll_s)
         watchers[call_id] = watcher
         watcher.start()
         return watcher

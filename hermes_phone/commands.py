@@ -351,8 +351,8 @@ def _cmd_check(rest: list[str], kwargs: dict) -> str:
     """Readiness report. Shows variable NAMES and masked numbers only, never secret values."""
     env = tools.get_service().environ
     chosen = modemod.resolve(env)
-    how = {"explicit": "set by HERMES_PHONE_MODE", "auto": "automatic: Twilio is not "
-           "configured, OpenAI and PUBLIC_BASE_URL are", "default": "default",
+    how = {"explicit": "set by HERMES_PHONE_MODE", "auto": "automatic: the phone line "
+           "is not configured, the web phone is", "default": "default",
            "bridge": "shared bridge, HERMES_PHONE_BRIDGE_URL is set"}[chosen.how]
     lines = ["hermes-phone setup check:",
              f"- mode: {chosen.name} ({how})"

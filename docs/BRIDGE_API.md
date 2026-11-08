@@ -60,7 +60,9 @@ approval (`phone_call`).
   sending. The goal is redacted. CVV, passwords and one-time codes are dropped even with
   consent. Raw facts, unconsented fields and the user's stored values never leave the
   workspace.
-- **Approval, the third enforcement point.** The bridge must refuse (`403 approval_required`)
+- **Approval, the third enforcement point.** The workspace is the trust boundary for its own
+  approvals: the bridge does not try to prove that a human tapped "call" (there is no signed
+  receipt). It does refuse (`403 approval_required`)
   a body with no `approval.id` or no `approval.consumed_at`. It must also refuse a body whose
   `expires_at` had already passed at `consumed_at`. Each `approval.id` is single-use per
   workspace: the first `PUT` consumes it and creates the call.
@@ -68,10 +70,19 @@ approval (`phone_call`).
   the bridge returns the existing call (`200`, same body) and does not dial again. If a
   different `approval.id` arrives for an existing `call_id`, or a used `approval.id` arrives for
   another `call_id`, the answer is `409`.
-- The bridge keeps its own safety rules no matter what the plugin sent: the emergency and
-  premium-number blocklist, one active call per workspace, the daily cap, the hard
-  maximum duration, quiet hours, no auto-redial, and the AI disclosure as the first sentence.
-  Breaking one of them gives `422` with a clear `code`.
+- **Bridge-side safety, from the bridge's own ledger.** The bridge enforces these rules
+  itself, using its own per-workspace call ledger, never the plugin's numbers:
+  - the emergency and premium-number blocklist;
+  - one active call per workspace;
+  - the daily cap;
+  - the hard maximum duration (it clamps `limits.max_duration_s`);
+  - quiet hours (21:00 to 08:00 in the callee's local time);
+  - no auto-redial;
+  - the AI disclosure as the first sentence.
+
+  The plugin keeps its own copies of these checks (defence in depth), but the bridge never
+  trusts them. Breaking a rule gives `422` with a clear `code` (`blocked_number`,
+  `active_call`, `daily_cap`, `quiet_hours`).
 - `201` (new) or `200` (repeat): `{"call_id": "...", "state": "dialing", "bridge_call_id":
   "<opaque, optional>"}`.
 
@@ -81,7 +92,7 @@ sends `POST .../hangup` once, best effort, so a call created by a request whose 
 lost cannot stay live.
 
 ### `GET /v1/calls/{call_id}/updates?cursor=<opaque>`
-The plugin's watcher polls this about every 0.5 s while the call is live. After a restart, the
+The plugin's watcher polls this once a second while the call is live. After a restart, the
 `pre_llm_call` hook polls it once per turn. With no `cursor`, the bridge returns everything from
 the start.
 
@@ -89,15 +100,20 @@ the start.
 {
   "cursor": "opaque, at most 512 chars",
   "call": {"state": "in_progress", "outcome": null, "reason": null, "duration_s": null,
-           "disclosure_spoken": true, "result": null},
-  "events": [{"kind": "ringing", "ts": 1762268412.1, "data": {}}],
+           "disclosure_spoken": true, "result": null, "usage": null},
+  "events": [{"id": "e41", "kind": "ringing", "ts": 1762268412.1, "data": {}}],
   "questions": [{"id": "q7f3a", "question": "Name for the booking?", "field": "name",
                  "suggested": "Winch", "kind": "question", "consent_field": null,
                  "status": "open"}],
-  "transcript": [{"role": "agent", "text": "Hi, this is an AI assistant ...", "ts": 1762268413.0}]
+  "transcript": [{"id": "t9", "role": "agent", "text": "Hi, this is an AI assistant ...",
+                  "ts": 1762268413.0}]
 }
 ```
 
+- **Idempotent mirroring.** Every event and transcript line has a bridge-assigned `id`
+  (`[A-Za-z0-9_-]{1,64}`, unique within its call). The plugin drops items that have no `id`
+  and ignores any `id` it has already stored. A page served twice (for example after a crash
+  before the plugin saved the cursor) therefore changes nothing.
 - `events` and `transcript` hold only what is new since `cursor`. `questions` holds the full
   current form of every question created or changed since `cursor`. `call` is always the
   current snapshot.
@@ -107,6 +123,11 @@ the start.
   may skip intermediate local states. Once a call is terminal locally, it stays that way.
 - `call.result` (on end) is the `end_call` result:
   `{"outcome", "reason", "summary", "agreed": {...}, "next_steps"}`. It is stored once.
+- **Cost: `call.usage`.** Send `{"cost_usd": 0.42}` once the bridge knows what the call cost
+  the workspace (the figure counted against its allowance). In remote mode this is the only
+  cost the plugin ever shows. It drops its own estimate from the approval card and the result,
+  and when `usage` is absent or invalid it shows no cost figure at all. The latest valid value
+  wins.
 - A question `id` must match `[A-Za-z0-9_-]{1,64}` and be unique within the workspace. A
   question `status` is `open`, `answered`, `declined` or `timeout`; the plugin acts only on
   `timeout`. `kind` is `question` or `consent`.

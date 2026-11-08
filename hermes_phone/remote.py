@@ -27,6 +27,8 @@ log = logging.getLogger(__name__)
 
 API = "/v1"
 TIMEOUT_S = 10.0
+POLL_S = 1.0  # watcher interval for remote calls
+SID_PREFIX = "bridge-"  # provider_sid of every remote call (results.py shows bridge cost only)
 UNREACHABLE_FAIL_S = 120.0  # bridge silent this long during a live call: fail it locally
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _MIRROR_STATES = states.LIVE | states.TERMINAL  # the bridge may never set pre-dial states
@@ -56,6 +58,7 @@ def approval_id(appr: Mapping[str, Any]) -> str:
 class RemoteBridge:
     configured = True
     remote = True
+    poll_s = POLL_S
 
     def __init__(self, environ: Mapping[str, str], *, store: Store | None,
                  config: Callable[[str, Any], Any] | None = None,
@@ -140,12 +143,12 @@ class RemoteBridge:
             "options": {"store_transcripts": self._keep_transcripts()},
         }
         try:
-            data = self._request("PUT", self._path(cid), body)
+            self._request("PUT", self._path(cid), body)
         except BridgeError as exc:
             if not exc.status:  # outcome unknown (timeout): make sure nothing stays live
                 self.hangup(call)
             return DialResult(ok=False, error=f"phone service error: {exc}")
-        return DialResult(ok=True, provider_sid=str(data.get("bridge_call_id") or "")[:64])
+        return DialResult(ok=True, provider_sid=SID_PREFIX + cid)
 
     def hangup(self, call: dict) -> bool:
         cid = call.get("id") or ""
@@ -242,6 +245,11 @@ def _set_state(store: Store, cid: str, new: str, **fields: Any) -> None:
         store.add_event(cid, "state", {"from": call["state"], "to": new, "source": "bridge"})
 
 
+def _usd(value: Any) -> float | None:
+    ok = isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value < 1e6
+    return float(value) if ok else None
+
+
 def _str(value: Any, limit: int = 2000) -> str:
     return value[:limit] if isinstance(value, str) else ""
 
@@ -249,8 +257,9 @@ def _str(value: Any, limit: int = 2000) -> str:
 def mirror(store: Store, cid: str, data: Mapping[str, Any], *, keep_transcripts: bool = True
            ) -> None:
     """Apply one ``updates`` response to the local store. Bridge text is untrusted data."""
-    # shortcut: not one transaction; a crash before the cursor update replays this page
-    # (duplicate events/lines). Upgrade to a single SQLite transaction if that shows up.
+    # Idempotent: replaying a page (crash before the cursor update) changes nothing. Questions,
+    # events and transcript lines are keyed by bridge ids; state, result and usage are set-once
+    # or compare-and-set.
     for q in data.get("questions") or []:
         if not isinstance(q, dict) or not _ID_RE.match(str(q.get("id") or "")):
             continue
@@ -267,17 +276,22 @@ def mirror(store: Store, cid: str, data: Mapping[str, Any], *, keep_transcripts:
         if q.get("status") == "timeout" and local and local["status"] == "open":
             store.resolve_question(qid, "timeout")
     for line in (data.get("transcript") or []) if keep_transcripts else []:
-        if isinstance(line, dict) and line.get("role") in ("agent", "callee") and line.get("text"):
-            store.add_transcript_line(cid, line["role"], _str(line["text"]))
+        if (isinstance(line, dict) and _ID_RE.match(str(line.get("id") or ""))
+                and line.get("role") in ("agent", "callee") and line.get("text")):
+            store.add_transcript_line(cid, line["role"], _str(line["text"]), line["id"])
     for ev in data.get("events") or []:
-        if isinstance(ev, dict) and _str(ev.get("kind"), 64):
+        if (isinstance(ev, dict) and _ID_RE.match(str(ev.get("id") or ""))
+                and _str(ev.get("kind"), 64)):
             store.add_event(cid, "bridge." + ev["kind"][:64],
-                            ev.get("data") if isinstance(ev.get("data"), dict) else {})
+                            ev.get("data") if isinstance(ev.get("data"), dict) else {}, ev["id"])
     info = data.get("call") if isinstance(data.get("call"), dict) else {}
     if info.get("disclosure_spoken") is not None:
         store.set_disclosure(cid, bool(info["disclosure_spoken"]))
     if isinstance(info.get("duration_s"), int) and info["duration_s"] >= 0:
         store.update_call(cid, duration_s=info["duration_s"])
+    usage = info.get("usage")
+    if isinstance(usage, dict) and _usd(usage.get("cost_usd")) is not None:
+        store.update_call(cid, usage_json=json.dumps({"cost_usd": _usd(usage["cost_usd"])}))
     if isinstance(info.get("result"), dict):
         store.set_result_once(cid, info["result"], _str(info.get("outcome"), 64))
     state = info.get("state")

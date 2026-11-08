@@ -450,7 +450,7 @@ def test_hangup_falls_back_to_twilio_rest_when_bridge_is_down(svc, monkeypatch, 
     svc.dialer = Dialer()
     monkeypatch.setattr(relay, "HANGUP_WAIT_S", 0.05)
     out = commands.phone_command(f"hangup {cid}")
-    assert "Twilio" in out and Dialer.hung == [HANGUP_SID]
+    assert out == f"Call {cid} hung up." and Dialer.hung == [HANGUP_SID]
     call = store.get_call(cid)
     assert call["state"] == states.ABORTED and call["reason"] == "user_hangup"
     assert store.hangup_requested(cid)

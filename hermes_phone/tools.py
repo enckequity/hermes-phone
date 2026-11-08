@@ -317,6 +317,8 @@ def _phone_prepare(args: Any, kwargs: Mapping[str, Any], retry_of: str = "") -> 
         language=language, quiet_hours_override=override,
         question_timeout_s=svc.config_int("question_timeout_s",
                                           briefmod.DEFAULT_QUESTION_TIMEOUT_S))
+    if svc.mode == "remote":  # cost comes from the bridge's usage only, never plugin defaults
+        brief["limits"]["max_cost_estimate_usd"] = None
     call_id = "c" + uuid.uuid4().hex[:8]
     stored = dict(brief, facts_raw=facts, sensitive_requested=requested)
     store = svc.store
@@ -416,7 +418,7 @@ def _phone_call(args: Any, kwargs: Mapping[str, Any]) -> str:
                       relay_unavailable=True)
     dialer = svc.dialer
     if not getattr(dialer, "configured", True):
-        missing = ", ".join(getattr(dialer, "missing", []) or ["Twilio settings"])
+        missing = ", ".join(getattr(dialer, "missing", []) or ["phone settings"])
         return _error("Phone calling is not configured (missing: " + missing + "). Nothing was "
                       "dialed. Set the environment variables and run `hermes phone doctor`.",
                       configured=False)

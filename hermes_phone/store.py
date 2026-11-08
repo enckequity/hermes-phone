@@ -137,6 +137,11 @@ CREATE INDEX IF NOT EXISTS idx_calls_origin ON calls(origin_session_id, state);
 
 _SCHEMA_V7 = """
 ALTER TABLE calls ADD COLUMN bridge_cursor TEXT;
+ALTER TABLE calls ADD COLUMN usage_json TEXT;
+ALTER TABLE events ADD COLUMN bridge_id TEXT;
+ALTER TABLE transcripts ADD COLUMN bridge_id TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_events_bridge ON events(call_id, bridge_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_transcripts_bridge ON transcripts(call_id, bridge_id);
 """
 
 _MIGRATIONS: dict[int, str] = {1: _SCHEMA_V1, 2: _SCHEMA_V2, 3: _SCHEMA_V3, 4: _SCHEMA_V4,
@@ -146,7 +151,7 @@ _MIGRATIONS: dict[int, str] = {1: _SCHEMA_V1, 2: _SCHEMA_V2, 3: _SCHEMA_V3, 4: _
 _CALL_COLUMNS = {
     "state", "approved_at", "dialed_at", "ended_at", "provider_sid", "outcome", "reason",
     "result_json", "result_delivered", "user_id", "session_id", "duration_s",
-    "hangup_requested_at", "result_posted_at", "bridge_cursor",
+    "hangup_requested_at", "result_posted_at", "bridge_cursor", "usage_json",
 }
 
 
@@ -488,16 +493,20 @@ class Store:
         return bool(row and row["t"] is not None)
 
     # -- events and transcripts ----------------------------------------
-    def add_event(self, call_id: str, kind: str, data: dict | None = None) -> None:
-        self._exec("INSERT INTO events(call_id,ts,kind,data_json) VALUES(?,?,?,?)",
-                   (call_id, self.clock(), kind, json.dumps(data or {})))
+    def add_event(self, call_id: str, kind: str, data: dict | None = None,
+                  bridge_id: str | None = None) -> None:
+        """``bridge_id`` (remote bridge) makes a replayed event a no-op."""
+        self._exec("INSERT OR IGNORE INTO events(call_id,ts,kind,data_json,bridge_id) "
+                   "VALUES(?,?,?,?,?)",
+                   (call_id, self.clock(), kind, json.dumps(data or {}), bridge_id))
 
     def events(self, call_id: str) -> list[dict]:
         return self._all("SELECT * FROM events WHERE call_id=? ORDER BY id", (call_id,))
 
-    def add_transcript_line(self, call_id: str, role: str, text: str) -> None:
-        self._exec("INSERT INTO transcripts(call_id,ts,role,text) VALUES(?,?,?,?)",
-                   (call_id, self.clock(), role, text))
+    def add_transcript_line(self, call_id: str, role: str, text: str,
+                            bridge_id: str | None = None) -> None:
+        self._exec("INSERT OR IGNORE INTO transcripts(call_id,ts,role,text,bridge_id) "
+                   "VALUES(?,?,?,?,?)", (call_id, self.clock(), role, text, bridge_id))
 
     def transcript(self, call_id: str) -> list[dict]:
         return self._all("SELECT ts,role,text FROM transcripts WHERE call_id=? ORDER BY id",

@@ -99,6 +99,8 @@ def rsvc(store, ctx, bridge):
            "HERMES_PHONE_BRIDGE_TOKEN": TOKEN}
     service = tools.configure(ctx=ctx, store=store, environ=env)
     service.watch_poll_s = 0.02
+    assert service.dialer.poll_s == 1.0  # remote default
+    service.dialer.poll_s = 0.02
     yield service
     for w in list(service.watchers.values()):
         w.stop.set()
@@ -229,12 +231,14 @@ def test_cursor_polling_mirrors_state_questions_transcript_and_result(rsvc, brid
     call = dialed(rsvc)
     cid = call["id"]
     bridge.pages = [
-        {"cursor": "c1", "call": {"state": "ringing"}, "events": [{"kind": "ringing"}]},
+        {"cursor": "c1", "call": {"state": "ringing"}, "events": [{"id": "e1", "kind": "ringing"}]},
         {"cursor": "c2", "call": {"state": "on_hold_for_user", "disclosure_spoken": True},
          "questions": [{"id": "q1", "question": "Name for the booking?", "field": "name",
                         "status": "open"}],
-         "transcript": [{"role": "agent", "text": "Hi, this is an AI assistant calling."}]},
+         "transcript": [{"id": "t1", "role": "agent",
+                         "text": "Hi, this is an AI assistant calling."}]},
         {"cursor": "c3", "call": {"state": "completed", "outcome": "success", "duration_s": 42,
+                                  "usage": {"cost_usd": 0.31},
                                   "result": {"outcome": "success", "agreed": {"time": "20:00"}}}},
     ]
     for _ in range(4):
@@ -245,6 +249,7 @@ def test_cursor_polling_mirrors_state_questions_transcript_and_result(rsvc, brid
     assert got["state"] == states.COMPLETED and got["outcome"] == "success"
     assert got["duration_s"] == 42 and got["disclosure_spoken"] == 1 and got["ended_at"]
     assert got["result"]["agreed"] == {"time": "20:00"} and got["bridge_cursor"] == "c3"
+    assert json.loads(got["usage_json"]) == {"cost_usd": 0.31}
     assert rsvc.store.get_question("q1")["call_id"] == cid
     assert rsvc.store.transcript(cid)[0]["role"] == "agent"
     assert any(e["kind"] == "bridge.ringing" for e in rsvc.store.events(cid))
@@ -331,3 +336,43 @@ def test_watcher_posts_cards_and_one_result_from_remote_updates(rsvc, bridge, ct
     wait_for(lambda: rsvc.store.get_call(cid)["result_posted_at"] is not None)
     results = [m for m in ctx.messages if "party_size" in m.text or "4" in m.text]
     assert results and rsvc.store.get_call(cid)["state"] == states.COMPLETED
+
+
+def test_replayed_page_is_idempotent(rsvc, bridge):
+    call = dialed(rsvc)
+    cid = call["id"]
+    page = {"cursor": "c1", "call": {"state": "in_progress"},
+            "events": [{"id": "e1", "kind": "answered"}, {"kind": "no id, dropped"}],
+            "questions": [{"id": "q1", "question": "Name?", "field": "name", "status": "open"}],
+            "transcript": [{"id": "t1", "role": "agent", "text": "Hi, an AI assistant here."},
+                           {"id": "t2", "role": "callee", "text": "Hello?"}]}
+    remote.mirror(rsvc.store, cid, page)
+    before = (rsvc.store.events(cid), rsvc.store.transcript(cid),
+              rsvc.store.questions_for_call(cid))
+    remote.mirror(rsvc.store, cid, json.loads(json.dumps(page)))  # crash before cursor: replay
+    after = (rsvc.store.events(cid), rsvc.store.transcript(cid),
+             rsvc.store.questions_for_call(cid))
+    assert after == before
+    assert [e["kind"] for e in after[0]].count("bridge.answered") == 1
+    assert len(after[1]) == 2 and len(after[2]) == 1
+
+
+def test_remote_cost_comes_only_from_bridge_usage(rsvc, bridge, ctx):
+    from hermes_phone import results
+
+    cid = prepare()["call_id"]
+    card = next(m.text for m in ctx.messages if "Call brief" in m.text)
+    assert "est. cost" not in card  # no plugin-default estimate in remote mode
+    approve(rsvc, cid)
+    rsvc.store.consume_approval(cid)
+    states.transition(rsvc.store, cid, states.DIALING, dialed_at=rsvc.store.clock())
+    rsvc.store.update_call(cid, provider_sid=remote.SID_PREFIX + cid)
+    end = {"state": "completed", "outcome": "success", "duration_s": 95,
+           "result": {"outcome": "success"}}
+    remote.mirror(rsvc.store, cid, {"call": end})
+    text = results.result_message(rsvc.store.get_call(cid), rsvc.config)
+    assert "$" not in text  # no usage: no cost figure at all
+    rsvc.store.update_call(cid, usage_json=json.dumps({"cost_usd": 0.42}))
+    assert "$0.42" in results.result_message(rsvc.store.get_call(cid), rsvc.config)
+    upstream = dict(rsvc.store.get_call(cid), provider_sid="CA1")
+    assert "about $" in results.result_message(upstream, rsvc.config)  # other modes unchanged

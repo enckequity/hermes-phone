@@ -92,6 +92,13 @@ def refresh_brief(call: dict, granted: set[str]) -> dict:
     """Recompute the public parts of a stored brief after consent changed. Returns the new brief
     (without raw facts); the caller persists it merged with the raw data."""
     old = call["brief"]
+    new = _rebuild(call, old, granted)
+    if old["limits"].get("max_cost_estimate_usd", 0) is None:  # remote mode: no plugin estimate
+        new["limits"]["max_cost_estimate_usd"] = None
+    return new
+
+
+def _rebuild(call: dict, old: dict, granted: set[str]) -> dict:
     return build_brief(
         callee_name=call["callee_name"], number=call["number"],
         number_source=call.get("number_source") or "", goal=call["goal"],
@@ -143,10 +150,11 @@ def format_card(brief: dict, call_id: str) -> str:
     if brief["needs_consent"]:
         lines.append("Needs your consent to share: " + ", ".join(brief["needs_consent"])
                      + " (left out unless you allow it when asked during the call)")
+    cost = lim.get("max_cost_estimate_usd")
     lines.append(
         f"Limits: max {lim['max_duration_s']} s, "
-        f"est. cost up to ${lim['max_cost_estimate_usd']:.2f}, "
-        f"recording {'on' if lim['recording'] else 'off'}"
+        + (f"est. cost up to ${cost:.2f}, " if cost is not None else "")
+        + f"recording {'on' if lim['recording'] else 'off'}"
     )
     if brief["quiet_hours_override"]:
         lines.append("Quiet hours override: yes")
