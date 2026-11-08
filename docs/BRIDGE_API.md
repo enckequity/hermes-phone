@@ -30,7 +30,9 @@ credential, so no request body names a workspace. The bridge accepts two credent
    hash of name and token); `401` is `401` and is remembered for 60 seconds; anything else,
    including a timeout, is `503 auth_unavailable` and is not cached. Bad shapes are `401`
    without a lookup. The bridge makes at most 120 lookups a minute in total (`429` past that)
-   and 8 at a time (`503` when all 8 are busy). With the auth URL unset this path is off.
+   and 8 at a time (`503` when all 8 are busy). A token that verified in the last 24 hours
+   (up to 10,000 remembered, oldest dropped first) re-verifies outside that budget and the
+   per-address count, so junk traffic cannot lock out working workspaces; a `401` forgets it. With the auth URL unset this path is off.
 
 A workspace marked `disabled` in the overrides gets `403 workspace_disabled`.
 
@@ -38,7 +40,9 @@ Rate limits, answered with `429 rate_limited`: 60 a minute per verified workspac
 minute per client address counting only requests that cost work (a usage-token lookup that
 misses the cache, or a failed auth). Verified requests never count against the address, so
 workspaces sharing an egress address do not lock each other out. The plugin
-polls `updates` every 2 seconds, which stays well inside that.
+polls `updates` every 2 seconds, which stays well inside that. `429` and `503` carry `Retry-After`. The client
+treats both as "wait" (it honours `Retry-After`, else waits 2 to 10 seconds with jitter) and
+never counts them as the bridge being unreachable, so they cannot fail a live call.
 
 A call id, question id or cursor that belongs to
 another workspace is answered with `404`, exactly as if it did not exist. The client never

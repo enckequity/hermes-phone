@@ -19,6 +19,7 @@ import re
 import threading
 import urllib.error
 import urllib.request
+from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,6 +37,8 @@ WORKSPACE_HEADER = "x-teamshift-workspace"
 CACHE_TTL_S = 600.0
 DENY_TTL_S = 60.0  # a refused usage token is not re-checked for a minute
 AUTH_GETS_PER_MIN = 120  # global budget of auth-service lookups
+KNOWN_GOOD_S = 86400.0  # a key that verified within this long re-verifies outside the budget
+KNOWN_GOOD_MAX = 10000
 DEFAULT_DAILY_CAP = 10
 DEFAULT_TZ = "America/New_York"
 
@@ -137,6 +140,9 @@ class Authenticator:
         self._cache: dict[str, float] = {}  # sha256(name, token) -> expiry, successes
         self._denied: dict[str, float] = {}  # same key -> expiry, 401s
         self.budget = Window(AUTH_GETS_PER_MIN, clock)
+        # key -> last verified; oldest first. Junk can spend the budget, never lock these out.
+        self._known: OrderedDict[str, float] = OrderedDict()
+        self._known_lock = threading.Lock()
 
     def check(self, authorization: str, workspace_header: str) -> tuple[Workspace | None, str]:
         """``(workspace, "")`` or ``(None, code)`` with code ``unauthorized``,
@@ -162,11 +168,23 @@ class Authenticator:
     def _key(name: str, token: str) -> str:
         return hashlib.sha256(f"{name}\0{token}".encode()).hexdigest()
 
-    def cached(self, authorization: str, workspace_header: str) -> bool:
-        """True when this usage token already passed within the cache window (no lookup)."""
-        token = authorization.partition(" ")[2].strip()
-        key = self._key(workspace_header.strip(), token)
-        return self._cache.get(key, 0) > self.clock()
+    def trusted(self, authorization: str, workspace_header: str) -> bool:
+        """True when this usage token is cached or verified within 24 h: such a request skips
+        the per-IP count and the global lookup budget."""
+        key = self._key(workspace_header.strip(), authorization.partition(" ")[2].strip())
+        now = self.clock()
+        return self._cache.get(key, 0) > now or self._is_known(key, now)
+
+    def _is_known(self, key: str, now: float) -> bool:
+        with self._known_lock:
+            return self._known.get(key, -KNOWN_GOOD_S) > now - KNOWN_GOOD_S
+
+    def _remember(self, key: str, now: float) -> None:
+        with self._known_lock:
+            self._known.pop(key, None)
+            self._known[key] = now
+            while len(self._known) > KNOWN_GOOD_MAX:
+                self._known.popitem(last=False)
 
     def _usage(self, token: str, name: str) -> tuple[str | None, str]:
         if not self.auth_url or not USAGE_TOKEN_RE.match(token) or not USAGE_WORKSPACE_RE.match(
@@ -178,7 +196,7 @@ class Authenticator:
             return name, ""
         if self._denied.get(key, 0) > now:
             return None, "unauthorized"
-        if not self.budget.hit("auth"):
+        if not self._is_known(key, now) and not self.budget.hit("auth"):
             return None, "rate_limited"
         status = self.http_get(self.auth_url, {"Authorization": f"Bearer {token}",
                                                "x-teamshift-workspace": name,
@@ -187,8 +205,11 @@ class Authenticator:
             if len(self._cache) > 10000:  # bound memory: drop expired entries
                 self._cache = {k: v for k, v in self._cache.items() if v > now}
             self._cache[key] = now + CACHE_TTL_S
+            self._remember(key, now)
             return name, ""
         if status == 401:
+            with self._known_lock:
+                self._known.pop(key, None)
             if len(self._denied) > 10000:
                 self._denied = {k: v for k, v in self._denied.items() if v > now}
             self._denied[key] = now + DENY_TTL_S

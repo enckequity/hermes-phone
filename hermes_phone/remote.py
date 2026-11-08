@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import random
 import re
 import time
 import urllib.error
@@ -30,15 +31,27 @@ TIMEOUT_S = 10.0
 POLL_S = 2.0  # watcher interval for remote calls (bridge allows 60 requests a minute)
 SID_PREFIX = "bridge-"  # provider_sid of every remote call (results.py shows bridge cost only)
 UNREACHABLE_FAIL_S = 120.0  # bridge silent this long during a live call: fail it locally
+BACKOFF = (429, 503)  # the bridge is up but asks us to wait: never counts as unreachable
+BACKOFF_S = (2.0, 10.0)  # jittered wait when there is no Retry-After
+BACKOFF_MAX_S = 120.0
+_clock = time.monotonic  # tests replace it
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _MIRROR_STATES = states.LIVE | states.TERMINAL  # the bridge may never set pre-dial states
 _LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 
 class BridgeError(Exception):
-    def __init__(self, message: str, status: int = 0) -> None:
+    def __init__(self, message: str, status: int = 0, retry_after: float | None = None) -> None:
         super().__init__(message)
         self.status = status
+        self.retry_after = retry_after
+
+
+def _retry_after(raw: str | None) -> float | None:
+    try:
+        return min(max(float(raw or ""), 0.0), BACKOFF_MAX_S)
+    except ValueError:
+        return None  # absent, or an HTTP date: use the jittered default
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -70,6 +83,7 @@ class RemoteBridge:
         self._pushed: set[str] = set()  # question ids whose answer the bridge accepted
         self._hung: set[str] = set()
         self._down_since: dict[str, float] = {}
+        self._wait_until: dict[str, float] = {}  # call id -> monotonic time to poll again
 
     # -- HTTP --
     @property
@@ -96,7 +110,8 @@ class RemoteBridge:
             with _OPENER.open(req, timeout=self.timeout_s) as resp:
                 raw = resp.read()
         except urllib.error.HTTPError as exc:
-            raise BridgeError(f"HTTP {exc.code}: {_error_text(exc)}", exc.code) from None
+            raise BridgeError(f"HTTP {exc.code}: {_error_text(exc)}", exc.code,
+                              _retry_after(exc.headers.get("Retry-After"))) from None
         except (urllib.error.URLError, OSError) as exc:
             raise BridgeError(f"not reachable ({type(exc).__name__})") from None
         try:
@@ -171,6 +186,8 @@ class RemoteBridge:
         call = store.get_call(call_id)
         if call is None or call["state"] in states.TERMINAL:
             return
+        if _clock() < self._wait_until.get(call_id, 0.0):
+            return  # backing off after a 429/503
         try:
             self._push(store, call)
             path = self._path(call_id, "updates")
@@ -178,6 +195,13 @@ class RemoteBridge:
                 path += "?cursor=" + urllib.parse.quote(call["bridge_cursor"], safe="")
             data = self._request("GET", path)
         except BridgeError as exc:
+            if exc.status in BACKOFF:
+                wait = exc.retry_after
+                if wait is None:
+                    wait = random.uniform(*BACKOFF_S)
+                self._wait_until[call_id] = _clock() + wait
+                log.info("bridge asked %s to wait %.0f s (HTTP %s)", call_id, wait, exc.status)
+                return
             self._unreachable(store, call, exc)
             return
         except Exception:  # noqa: BLE001 - a watcher must keep going
@@ -215,8 +239,8 @@ class RemoteBridge:
         cid = call["id"]
         log.warning("bridge sync failed for %s: %s", cid, exc)
         gone = exc.status in (401, 403, 404)
-        first = self._down_since.setdefault(cid, time.monotonic())
-        if not gone and time.monotonic() - first < UNREACHABLE_FAIL_S:
+        first = self._down_since.setdefault(cid, _clock())
+        if not gone and _clock() - first < UNREACHABLE_FAIL_S:
             return
         reason = "bridge_rejected" if gone else "bridge_unreachable"
         store.set_result_once(cid, {"outcome": "failed", "reason": reason,

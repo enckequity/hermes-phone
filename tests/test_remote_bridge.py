@@ -33,9 +33,11 @@ class FakeBridge:
             def _go(self):
                 n = int(self.headers.get("Content-Length") or 0)
                 body = json.loads(self.rfile.read(n)) if n else None
-                status, data = bridge.handle(self.command, self.path, self.headers, body)
+                status, data, *extra = bridge.handle(self.command, self.path, self.headers, body)
                 raw = json.dumps(data).encode()
                 self.send_response(status)
+                for k, v in (extra[0] if extra else {}).items():
+                    self.send_header(k, v)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(raw)))
                 self.end_headers()
@@ -392,3 +394,33 @@ def test_usage_token_pair_is_the_fallback_credential(bridge):
     assert modemod.resolve({**base, **pair}).missing == []
     assert modemod.resolve({**base, "TEAMSHIFT_USAGE_TOKEN": TOKEN}).missing == [
         "HERMES_PHONE_BRIDGE_TOKEN"]
+
+
+def test_429_and_503_back_off_and_never_fail_a_live_call(store, bridge, monkeypatch):
+    now = [1000.0]
+    monkeypatch.setattr(remote, "_clock", lambda: now[0])
+    monkeypatch.setattr(remote.random, "uniform", lambda a, b: b)
+    b = remote.RemoteBridge({"HERMES_PHONE_BRIDGE_URL": bridge.url,
+                             "HERMES_PHONE_BRIDGE_TOKEN": TOKEN}, store=store)
+    store.create_call("c1", state="dialing", callee_name="X", number=TEST_NUMBER,
+                      number_source="user", goal="g", brief={"limits": {}})
+    busy = {"error": {"code": "rate_limited", "message": "slow down"}}
+    bridge.fail["updates"] = (429, busy, {"Retry-After": "7"})
+    b.sync(store, "c1")
+    assert b._wait_until["c1"] == 1007.0  # Retry-After honoured
+    n = len(bridge.of("GET", "/updates"))
+    now[0] += 5
+    b.sync(store, "c1")
+    assert len(bridge.of("GET", "/updates")) == n  # still waiting: no request
+    bridge.fail["updates"] = (503, busy)  # no Retry-After: jittered 2-10 s
+    while now[0] < 1000.0 + 180:  # three minutes of 429/503
+        now[0] += 1
+        b.sync(store, "c1")
+    assert store.get_call("c1")["state"] == "dialing"
+    assert "c1" not in b._down_since
+    assert len(bridge.of("GET", "/updates")) <= n + 180 // 10 + 1
+    del bridge.fail["updates"]
+    now[0] += 11
+    b.sync(store, "c1")
+    assert len(bridge.of("GET", "/updates")) > n
+    assert store.get_call("c1")["state"] == "dialing"

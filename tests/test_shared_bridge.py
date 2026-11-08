@@ -789,3 +789,55 @@ def test_shared_egress_ip_verified_traffic_is_not_ip_limited(store, clock):
     assert sb.client.get("/v1/health", headers=miss).status_code == 429  # a lookup costs work
     assert len(lookups) == 1
     assert sb.client.get("/v1/health", headers=hmac_a).status_code == 200
+
+
+def test_junk_cannot_spend_the_budget_of_known_good_workspaces(store, clock):
+    sb = Shared(store, clock, trust_proxy=True, auth_url="https://auth.invalid/v")
+    good = "ts_usg_" + "a" * 64
+    lookups = []
+
+    def http_get(_url, headers, _t):
+        lookups.append(headers["Authorization"])
+        return 200 if headers["Authorization"] == f"Bearer {good}" else 401
+
+    sb.app.state.authenticator.http_get = http_get
+    usage = {"Authorization": f"Bearer {good}", "X-TeamShift-Workspace": "t-0123456789",
+             "X-Forwarded-For": "203.0.113.1"}
+    assert sb.client.get("/v1/health", headers=usage).status_code == 200
+    clock.advance(auth.CACHE_TTL_S + 1)  # success cache expired; a new minute
+    for n in range(auth.AUTH_GETS_PER_MIN):  # junk from two IPs spends the global budget
+        r = sb.client.get("/v1/health", headers={
+            **usage, "Authorization": f"Bearer ts_usg_{n + 1:064x}",
+            "X-Forwarded-For": f"198.51.100.{n % 2}"})
+        assert r.status_code in (401, 429)
+    fresh = {**usage, "Authorization": "Bearer ts_usg_" + "f" * 64}
+    r = sb.client.get("/v1/health", headers=fresh)
+    assert r.status_code == 429 and r.headers["Retry-After"] == "10"  # unknown: budget spent
+    before = len(lookups)
+    assert sb.client.get("/v1/health", headers=usage).status_code == 200  # known-good
+    assert len(lookups) == before + 1  # re-verified, outside the budget
+    authn = sb.app.state.authenticator
+    clock.advance(auth.CACHE_TTL_S + 1)
+    sb.app.state.authenticator.http_get = lambda *a: 401  # revoked
+    assert sb.client.get("/v1/health", headers=usage).status_code == 401
+    assert not authn.trusted(usage["Authorization"], "t-0123456789")  # a 401 drops it
+
+
+def test_known_good_set_is_bounded_and_expires():
+    now = [0.0]
+    a = auth.Authenticator(signing_key="", auth_url="https://auth.invalid/v", overrides={},
+                           clock=lambda: now[0], http_get=lambda *x: 200)
+    a._remember("first", 0.0)
+    for n in range(auth.KNOWN_GOOD_MAX):
+        a._remember(f"k{n}", 0.0)
+    assert len(a._known) == auth.KNOWN_GOOD_MAX and "first" not in a._known  # oldest dropped
+    assert a._is_known("k0", auth.KNOWN_GOOD_S - 1) and not a._is_known("k0", auth.KNOWN_GOOD_S)
+
+
+def test_sweep_skips_calls_driven_by_this_process(sb):
+    iid, _ = sb.dial("c1")
+    sb.app.state.sessions[iid] = object()
+    sb.clock.advance(3600)
+    assert sb.app.state.reap() == 0
+    del sb.app.state.sessions[iid]
+    assert sb.app.state.reap() == 1

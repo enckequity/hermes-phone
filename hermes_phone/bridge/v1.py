@@ -102,7 +102,9 @@ _LEDGER_COLUMNS = {"answered_at", "media_started_at", "ended_at", "stream_reques
 
 def error(code: str) -> JSONResponse:
     status, message = ERRORS[code]
-    return JSONResponse({"error": {"code": code, "message": message}}, status_code=status)
+    retry = {"Retry-After": "10"} if code in ("rate_limited", "auth_unavailable") else None
+    return JSONResponse({"error": {"code": code, "message": message}}, status_code=status,
+                        headers=retry)
 
 
 def disclosure(business_name: str, record: bool = False) -> str:
@@ -229,14 +231,14 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
         return request.client.host if request.client else ""
 
     async def tenant_of(request: Request) -> tuple[auth.Workspace | None, Response | None]:
-        # The per-IP limit counts only requests that cost work: a usage-token lookup that misses
-        # the cache, or a failed auth. Verified traffic counts against its workspace only, so
-        # workspaces sharing an egress IP cannot lock each other out.
+        # The per-IP limit counts only requests that cost work: a lookup for a token that is
+        # neither cached nor known-good, or a failed auth. Verified traffic counts against its
+        # workspace only, so workspaces sharing an egress IP cannot lock each other out.
         authz = request.headers.get("authorization") or ""
         claimed = request.headers.get(auth.WORKSPACE_HEADER) or ""
         counted = False
         if authz.partition(" ")[2].strip().startswith(auth.USAGE_PREFIX):  # network lookup
-            if not authn.cached(authz, claimed):
+            if not authn.trusted(authz, claimed):
                 counted = True
                 if not by_client.hit(client_ip(request)):
                     return None, error("rate_limited")
@@ -691,6 +693,8 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
         n = 0
         for r in rows:
             iid = r["internal_id"]
+            if not restart and iid in sessions:
+                continue  # driven by this process: its own ticker enforces the cap
             call = store.get_call(iid)
             limit = int(call["brief"]["limits"]["max_duration_s"])
             if not restart and now < (r["created_at"] + limit + telnyx_io.DIAL_TIMEOUT_S
