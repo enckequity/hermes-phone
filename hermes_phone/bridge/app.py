@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from .. import safety, states
 from ..store import Store
 from . import realtime as rt
-from . import twilio_io, webroutes
+from . import telnyx_io, twilio_io, v1, webroutes
 from .session import CallSession
 from .settings import BridgeSettings
 from .status import apply_status
@@ -25,7 +25,8 @@ TWIML_OK_STATES = frozenset({states.DIALING, states.RINGING, states.IN_PROGRESS}
 
 def create_app(settings: BridgeSettings, *, store: Store | None = None,
                realtime_connect: rt.RealtimeConnect | None = None,
-               twilio_client: Any = None, clock: Callable[[], float] | None = None) -> FastAPI:
+               twilio_client: Any = None, clock: Callable[[], float] | None = None,
+               telnyx_client: Any = None) -> FastAPI:
     app = FastAPI(title="hermes-phone bridge", docs_url=None, redoc_url=None, openapi_url=None)
     the_store = store if store is not None else Store(path=settings.db_path or None)
     the_clock = clock or the_store.clock
@@ -57,6 +58,12 @@ def create_app(settings: BridgeSettings, *, store: Store | None = None,
     @app.get("/healthz")
     async def healthz() -> dict:
         return {"ok": True}
+
+    if settings.shared:  # multi-tenant: only the workspace-scoped /v1 surface exists
+        v1.register(app, settings=settings, store=the_store, clock=the_clock, connect=connect,
+                    telnyx=telnyx_client or telnyx_io.TelnyxClient(settings.telnyx_api_key),
+                    sessions=sessions)
+        return app
 
     @app.post("/twiml/{call_id}")
     async def twiml(call_id: str, request: Request) -> Response:

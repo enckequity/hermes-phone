@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import time
 
 import pytest
@@ -137,6 +138,7 @@ def test_unconsented_sensitive_values_never_reach_realtime(harness):
         start(harness, ws, cid, token)
         harness.rt.push({"type": "input_audio_buffer.speech_stopped"})
         wait_for(lambda: harness.store.open_questions())  # consent card: waits, no output yet
+        assert re.fullmatch(r"q[0-9a-f]{24}", harness.store.open_questions()[0]["id"])
     blob = json.dumps(harness.rt.sent)
     assert not harness.rt.of("conversation.item.create")
     for secret in (CARD, "4111", ADDRESS, "Baker"):
@@ -380,7 +382,7 @@ def test_realtime_connection_loss_apologises_and_fails(harness):
         wait_for(lambda: harness.tw.updates)
         drain(ws)
     call = harness.store.get_call(cid)
-    assert call["state"] == states.FAILED and call["reason"] == "realtime_connection_lost"
+    assert call["state"] == states.FAILED and call["reason"] == "voice_connection_lost"
     assert "Say" in harness.tw.updates[0]["twiml"] and "Hangup" in harness.tw.updates[0]["twiml"]
 
 

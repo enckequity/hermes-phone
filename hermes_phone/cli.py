@@ -13,6 +13,9 @@ def setup(parser: argparse.ArgumentParser) -> None:
     sub = parser.add_subparsers(dest="phone_cmd")
     sub.add_parser("serve", help="Run the media bridge (Twilio <-> OpenAI Realtime)")
     sub.add_parser("doctor", help="Check env vars, allowlist and bridge health (names only)")
+    tok = sub.add_parser("bridge-token",
+                         help="Mint a shared-bridge workspace token (key from env)")
+    tok.add_argument("workspace")
 
 
 def make_handler(ctx: Any = None) -> Callable[[argparse.Namespace], int]:
@@ -22,7 +25,9 @@ def make_handler(ctx: Any = None) -> Callable[[argparse.Namespace], int]:
             return serve(ctx)
         if cmd == "doctor":
             return doctor()
-        print("usage: hermes phone {serve|doctor}")
+        if cmd == "bridge-token":
+            return bridge_token(args.workspace)
+        print("usage: hermes phone {serve|doctor|bridge-token <workspace>}")
         return 2
 
     return handler
@@ -70,7 +75,7 @@ def run_checks(environ: Mapping[str, str], http_get: Callable[[str, float], int]
     if chosen.name == modemod.REMOTE:  # shared bridge: only its two variables and its health
         from .remote import RemoteBridge
 
-        for name in modemod.REMOTE_ENV:
+        for name in modemod.remote_env_names(environ):
             ok = bool((environ.get(name) or "").strip())
             out.append((f"env {name}", ok, "set" if ok else "MISSING"))
         problem = RemoteBridge(environ, store=None).preflight()
@@ -95,6 +100,20 @@ def run_checks(environ: Mapping[str, str], http_get: Callable[[str, float], int]
     else:
         out.append(("bridge health", False, "PUBLIC_BASE_URL not set"))
     return out
+
+
+def bridge_token(workspace: str, environ: Mapping[str, str] | None = None) -> int:
+    """Print ``<workspace>.<sig>``. The provisioner reuses the same algorithm (bridge/auth.py)."""
+    from .bridge import auth
+
+    key = ((os.environ if environ is None else environ).get("HERMES_PHONE_BRIDGE_SIGNING_KEY")
+           or "").strip()
+    try:
+        print(auth.mint(key, workspace))
+    except ValueError as exc:
+        print(f"bridge-token: {exc} (HERMES_PHONE_BRIDGE_SIGNING_KEY must be set)")
+        return 2
+    return 0
 
 
 def doctor() -> int:

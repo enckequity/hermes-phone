@@ -374,7 +374,7 @@ def _cmd_check(rest: list[str], kwargs: dict) -> str:
         "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM_NUMBER", "OPENAI_API_KEY",
         "PUBLIC_BASE_URL")
     if chosen.name == modemod.REMOTE:
-        names = modemod.REMOTE_ENV
+        names = modemod.remote_env_names(env)
     for name in names:
         value = (env.get(name) or "").strip()
         state = "set" if value else "MISSING"

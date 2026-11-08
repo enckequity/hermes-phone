@@ -130,7 +130,8 @@ def test_all_dependencies_upper_bounded(manifest):
     deps = (list(manifest["python_dependencies"]) + pyproject["dependencies"]
             + [d for group in pyproject.get("optional-dependencies", {}).values() for d in group])
     assert deps
-    assert "optional-dependencies" not in pyproject, "no extras: they must resolve in Hermes' lock"
+    # the only extra is the shared bridge's; the plugin inside Hermes never installs it
+    assert set(pyproject.get("optional-dependencies", {})) <= {"bridge"}
     for dep in deps:
         assert re.search(r"<\s*\d|==|~=", dep), f"no upper bound: {dep}"
     assert sorted(manifest["python_dependencies"]) == sorted(pyproject["dependencies"])
