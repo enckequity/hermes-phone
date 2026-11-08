@@ -7,6 +7,7 @@ lives in chat history for good.
 """
 from __future__ import annotations
 
+import json
 import math
 import re
 from datetime import UTC, datetime
@@ -239,6 +240,9 @@ def result_message(call: dict, config: Any = None, *, store_transcripts: bool = 
 def _tail(call: dict, dur: int | None, config: Any) -> str:
     if not dur:
         return ""
+    if str(call.get("provider_sid") or "").startswith("bridge-"):  # shared bridge: its usage only
+        cost = (json.loads(call["usage_json"]) if call.get("usage_json") else {}).get("cost_usd")
+        return f" {fmt_duration(dur)}" + (f", ${cost:.2f}." if cost is not None else ".")
     cost = estimate_cost(call, dur, config)
     return f" {fmt_duration(dur)}, about ${cost:.2f}."
 

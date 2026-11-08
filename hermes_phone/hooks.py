@@ -74,6 +74,11 @@ def pre_llm_call(**kwargs: Any) -> dict | None:
         store = tools.get_service().store
         lines: list[str] = []
         svc = tools.get_service()
+        sync = getattr(svc.dialer, "sync", None)
+        if sync is not None:  # remote bridge, no watcher (restart): refresh live calls first
+            for live in store.calls_in_states(states.LIVE):
+                if live["id"] not in svc.watchers:
+                    sync(store, live["id"])
         keep = bool(svc.config("store_transcripts", True))
         # A live watcher is about to post the result itself: leave it alone. After a restart no
         # watcher exists, so the agent relays the result once.

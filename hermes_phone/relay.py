@@ -348,9 +348,9 @@ def hangup(svc: Any, call_id: str = "", *, wait_s: float | None = None,
     if webphone.is_web_sid(cur.get("provider_sid")):
         return f"Call {call_id} ended (hung up by you)."
     if ok:
-        return f"Call {call_id} hung up through Twilio."
-    return (f"Call {call_id} is marked ended, but I could not confirm the line was dropped "
-            "(bridge unreachable and Twilio hangup unavailable). Check your phone or Twilio.")
+        return f"Call {call_id} hung up."
+    return (f"Call {call_id} is marked ended, but the phone service did not confirm the line "
+            "was dropped. Check your phone.")
 
 
 # ---- watcher ----------------------------------------------------------------------------------
@@ -405,6 +405,9 @@ class CallWatcher:
     # -- one poll; True when finished --
     def _step(self) -> bool:
         store = self.svc.store
+        sync = getattr(getattr(self.svc, "dialer", None), "sync", None)
+        if sync is not None:  # remote bridge: push answers, mirror its updates into the store
+            sync(store, self.call_id)
         call = store.get_call(self.call_id)
         if call is None:
             return True
@@ -550,7 +553,8 @@ def start_watcher(svc: Any, call_id: str) -> CallWatcher | None:
         watchers = svc.watchers
         if call_id in watchers:
             return watchers[call_id]
-        watcher = CallWatcher(svc, call_id, poll_s=svc.watch_poll_s)
+        poll_s = getattr(getattr(svc, "dialer", None), "poll_s", None) or svc.watch_poll_s
+        watcher = CallWatcher(svc, call_id, poll_s=poll_s)
         watchers[call_id] = watcher
         watcher.start()
         return watcher

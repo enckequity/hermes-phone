@@ -285,3 +285,12 @@ unchanged.
   `"off"` stops it: `agent/onboarding.py:119-125`, docs `website/docs/user-guide/configuration.md`
   "Onboarding"). `deploy/boot-config.py` sets it to `off` when `HERMES_PHONE_QUIET_AGENT=1`
   (default in the Docker image; set it to `0` to keep the offer).
+
+## Shared bridge mode
+
+When `HERMES_PHONE_BRIDGE_URL` is set (`mode.resolve` returns `remote`), the bridge is a shared,
+remote, multi-tenant service and the SQLite file is no longer shared. `remote.RemoteBridge`
+takes the dialer's place. `place_call` submits the approved call over HTTPS, and the watcher
+calls `sync` on each poll, which pushes answers and hangups and then mirrors bridge updates into
+the local store. Tools, hooks and cards keep reading the local store unchanged. Contract:
+`docs/BRIDGE_API.md`. When the variable is unset, nothing changes.

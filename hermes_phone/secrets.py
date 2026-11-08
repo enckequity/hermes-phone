@@ -13,7 +13,7 @@ from collections.abc import Iterator, Mapping
 
 SECRET_NAMES = frozenset({
     "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM_NUMBER", "OPENAI_API_KEY",
-    "PUBLIC_BASE_URL",
+    "PUBLIC_BASE_URL", "HERMES_PHONE_BRIDGE_TOKEN",
 })
 
 
@@ -32,7 +32,7 @@ def get(name: str, environ: Mapping[str, str] | None = None) -> str:
 
 
 class Environ(Mapping[str, str]):
-    """Process environment where the five secret names go through :func:`get`."""
+    """Process environment where the secret names go through :func:`get`."""
 
     def __getitem__(self, key: str) -> str:
         if key in SECRET_NAMES:

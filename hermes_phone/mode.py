@@ -10,15 +10,19 @@ from dataclasses import dataclass, field
 MODE_ENV = "HERMES_PHONE_MODE"
 TWILIO = "twilio"
 WEB = "web"
+REMOTE = "remote"  # a shared bridge reached over HTTPS (docs/BRIDGE_API.md)
+BRIDGE_URL_ENV = "HERMES_PHONE_BRIDGE_URL"
+BRIDGE_TOKEN_ENV = "HERMES_PHONE_BRIDGE_TOKEN"
+REMOTE_ENV = (BRIDGE_URL_ENV, BRIDGE_TOKEN_ENV)
 TWILIO_ENV = ("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM_NUMBER", "PUBLIC_BASE_URL")
 WEB_ENV = ("OPENAI_API_KEY", "PUBLIC_BASE_URL")
 
 
 @dataclass
 class Mode:
-    name: str  # "twilio" or "web"
+    name: str  # "twilio", "web" or "remote"
     missing: list[str] = field(default_factory=list)  # env names still needed for this mode
-    how: str = ""  # "explicit", "default" or "auto"
+    how: str = ""  # "explicit", "default", "auto" or "bridge"
 
 
 def _unset(environ: Mapping[str, str], names: tuple[str, ...]) -> list[str]:
@@ -27,7 +31,10 @@ def _unset(environ: Mapping[str, str], names: tuple[str, ...]) -> list[str]:
 
 def resolve(environ: Mapping[str, str]) -> Mode:
     """``HERMES_PHONE_MODE=web|twilio`` wins. Unset: Twilio when fully configured, web when
-    Twilio is incomplete but OPENAI_API_KEY and PUBLIC_BASE_URL are set, else Twilio (missing)."""
+    Twilio is incomplete but OPENAI_API_KEY and PUBLIC_BASE_URL are set, else Twilio (missing).
+    ``HERMES_PHONE_BRIDGE_URL`` beats all of them: calls go to the shared remote bridge."""
+    if (environ.get(BRIDGE_URL_ENV) or "").strip():
+        return Mode(REMOTE, _unset(environ, REMOTE_ENV), "bridge")
     explicit = (environ.get(MODE_ENV) or "").strip().lower()
     if explicit == WEB:
         return Mode(WEB, _unset(environ, WEB_ENV), "explicit")

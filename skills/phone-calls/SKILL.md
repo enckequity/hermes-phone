@@ -31,7 +31,7 @@ table for 4 at 20:00"). You have four tools: `phone_prepare`, `phone_call`, `pho
    for a call that `phone_status` shows as approved, dialing or in progress. If dialing is
    refused, quote the reason from `phone_status` verbatim and stop; do not retry in a loop.
    Keep replies about a call short and on topic; do not start unrelated side tasks.
-   **Web phone mode** (no Twilio; `/phone check` shows `mode: web`): nothing is dialed. A message
+   **Web phone mode** (no phone line; `/phone check` shows `mode: web`): nothing is dialed. A message
    with a link `.../phone/<id>?t=...` is posted to the chat. Tell the user to open that link and
    tap **Answer** within about a minute; they are the callee and the call starts when they do.
    If it times out the result is `no_answer`; do not redial, offer to prepare a new call.
