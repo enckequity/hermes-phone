@@ -177,10 +177,12 @@ def check_allowlist(e164: str, environ: Mapping[str, str] | None = None) -> Chec
 
 
 # -- quiet hours -------------------------------------------------------------------------
-def check_quiet_hours(e164: str, now: datetime | None = None, override: bool = False) -> Check:
+def check_quiet_hours(e164: str, now: datetime | None = None, override: bool = False,
+                      fallback_tz: str = "") -> Check:
     """Refuse outside 08:00 to 21:00 callee local time.
 
-    Fails closed: unknown zones refuse, and all candidate zones must agree.
+    Fails closed: unknown zones refuse (unless ``fallback_tz`` is given, which is then used), and
+    all candidate zones must agree.
     """
     if override:
         return OK
@@ -196,6 +198,8 @@ def check_quiet_hours(e164: str, now: datetime | None = None, override: bool = F
                  if z and not z.startswith("Etc/Unknown")]
     except Exception:  # noqa: BLE001
         zones = []
+    if not zones and fallback_tz:
+        zones = [fallback_tz]
     if not zones:  # fail closed: cannot prove it is business hours
         return Check(False, "Quiet hours: the callee's time zone is unknown. "
                             "Ask the user to confirm the time and override.")

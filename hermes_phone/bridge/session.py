@@ -92,7 +92,7 @@ class CallSession:
             # The opener waits for the callee's greeting (see _send_opening / _ticker).
         except Exception:  # noqa: BLE001
             log.exception("realtime connect failed for %s", self.call_id)
-            await self._finish(states.FAILED, "realtime_unavailable", "failed",
+            await self._finish(states.FAILED, "voice_unavailable", "failed",
                                "Could not connect to the voice model.", apology=True)
             return
         tasks = [asyncio.create_task(self._twilio_reader()),
@@ -147,7 +147,7 @@ class CallSession:
             ev = await self.conn.recv()
             if ev is None:
                 if not self.hung_up:
-                    await self._finish(states.FAILED, "realtime_connection_lost", "failed",
+                    await self._finish(states.FAILED, "voice_connection_lost", "failed",
                                        "The voice connection dropped.", apology=True)
                 return
             await self._on_realtime_event(ev)
@@ -517,8 +517,12 @@ class CallSession:
                                "Reached voicemail, did not leave a message.")
         elif twilio_io.machine_message_done(answered_by) and not self.wrapup_sent:
             self.wrapup_sent = True
+            step = rt.VOICEMAIL_INSTRUCTIONS
+            if not self._opening_sent:  # the stream began at the beep: disclosure goes first
+                self._opening_sent, self._opening_sent_at = True, self.clock()
+                step = (f"First say exactly: \"{self.payload['opening_line']}\" Then: " + step)
             await self._rt_send({"type": "response.create", "response": {
-                "instructions": self._ctx(rt.VOICEMAIL_INSTRUCTIONS)}})
+                "instructions": self._ctx(step)}})
 
     async def _finish(self, final: str, reason: str, outcome: str, summary: str = "",
                       *, rest: bool = True, apology: bool = False) -> None:

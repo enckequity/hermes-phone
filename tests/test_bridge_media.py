@@ -380,7 +380,7 @@ def test_realtime_connection_loss_apologises_and_fails(harness):
         wait_for(lambda: harness.tw.updates)
         drain(ws)
     call = harness.store.get_call(cid)
-    assert call["state"] == states.FAILED and call["reason"] == "realtime_connection_lost"
+    assert call["state"] == states.FAILED and call["reason"] == "voice_connection_lost"
     assert "Say" in harness.tw.updates[0]["twiml"] and "Hangup" in harness.tw.updates[0]["twiml"]
 
 
