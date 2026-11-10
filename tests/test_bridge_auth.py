@@ -76,6 +76,11 @@ def test_usage_token_401_5xx_timeout_not_cached(fake):
     assert len(fake.requests) == 4
 
 
+def test_usage_token_404_is_unauthorized(fake):
+    fake.status = 404  # the account service has no usage record for this workspace
+    assert authn(fake.url, [0.0]).check(f"Bearer {TOK}", WS) == (None, "unauthorized")
+
+
 def test_usage_token_bad_shapes_never_reach_service(fake):
     a = authn(fake.url, [0.0])
     for header, ws in ((f"Bearer {TOK}", "acme"), (f"Bearer {TOK}", ""),
