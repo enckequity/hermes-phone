@@ -27,7 +27,7 @@ credential, so no request body names a workspace. The bridge accepts two credent
 2. **Usage token** `ts_usg_<64 hex>` plus `X-TeamShift-Workspace: t-<10 hex>`. The bridge checks the
    pair with `GET <HERMES_PHONE_BRIDGE_AUTH_URL>`, sending `Authorization: Bearer <token>` and
    `x-teamshift-workspace: <name>`. `200` means valid and is cached for 10 minutes (keyed by a
-   hash of name and token); `401` is `401` and is remembered for 60 seconds; anything else,
+   hash of name and token); `401` (and `404`, no usage record for that workspace) is `401` and is remembered for 60 seconds; anything else,
    including a timeout, is `503 auth_unavailable` and is not cached. Bad shapes are `401`
    without a lookup. The bridge makes at most 120 lookups a minute in total (`429` past that)
    and 8 at a time (`503` when all 8 are busy). A token that verified in the last 24 hours

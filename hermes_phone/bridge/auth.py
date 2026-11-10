@@ -207,7 +207,7 @@ class Authenticator:
             self._cache[key] = now + CACHE_TTL_S
             self._remember(key, now)
             return name, ""
-        if status == 401:
+        if status in (401, 404):  # 404: the account service has no usage record for this workspace
             with self._known_lock:
                 self._known.pop(key, None)
             if len(self._denied) > 10000:
