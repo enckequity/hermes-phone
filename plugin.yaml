@@ -9,8 +9,8 @@ homepage: https://github.com/winchxyz/hermes-phone
 tags: [voice, phone, calls]
 provides_tools: [phone_prepare, phone_call, phone_status, phone_transcript]
 provides_hooks: [pre_tool_call, pre_llm_call, transform_llm_output]
+# The carrier SDK is only needed where calls are placed (the bridge, or a direct local setup): `pip install hermes-phone[bridge]`.
 python_dependencies:
-  - "twilio>=9,<10"
   - "fastapi>=0.110,<1"
   - "uvicorn[standard]>=0.29,<1"
   - "websockets>=14,<16"

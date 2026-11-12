@@ -135,6 +135,9 @@ def test_all_dependencies_upper_bounded(manifest):
     for dep in deps:
         assert re.search(r"<\s*\d|==|~=", dep), f"no upper bound: {dep}"
     assert sorted(manifest["python_dependencies"]) == sorted(pyproject["dependencies"])
+    # a workspace that dials through the shared bridge never needs the carrier SDK
+    assert not any(d.startswith("twilio") for d in manifest["python_dependencies"])
+    assert any(d.startswith("twilio") for d in pyproject["optional-dependencies"]["bridge"])
 
 
 def test_version_consistent(manifest):
