@@ -11,7 +11,6 @@ requires-python = ">=3.11"
 license = {text = "MIT"}
 authors = [{name = "winchxyz"}]
 dependencies = [
-  "twilio>=9,<10",
   "fastapi>=0.110,<1",
   "uvicorn[standard]>=0.29,<1",
   "websockets>=14,<16",
@@ -21,7 +20,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-bridge = ["cryptography>=42,<51"]  # shared bridge only (webhook signatures)
+bridge = ["cryptography>=42,<51", "twilio>=9,<10"]  # where calls are placed: the bridge, or a direct local setup
 
 [project.urls]
 Homepage = "https://github.com/winchxyz/hermes-phone"
