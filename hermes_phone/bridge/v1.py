@@ -368,11 +368,21 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
                 return error(code)
             max_d = min(max_d, granted)
         hook = f"{settings.public_base_url}/v1/telnyx/calls/{iid}/{secret}"
+        # The workspace's own verified number when it has one (enckequity/teamshift#2908), else the shared line.
         req = telnyx_io.dial_body(connection_id=settings.telnyx_connection_id, to=e164,
-                                  from_=settings.caller_number, webhook_url=hook,
+                                  from_=t.caller or settings.caller_number, webhook_url=hook,
                                   time_limit_s=max_d + DURATION_MARGIN_S)
         try:
-            data = await in_carrier_pool(telnyx.post, "/calls", req)
+            try:
+                data = await in_carrier_pool(telnyx.post, "/calls", req)
+            except telnyx_io.TelnyxError as exc:
+                # A 403 D51 (caller ID not verified) is refused before anything rings, so one redial on the shared line is safe.
+                # Every other error, and a timeout above all, may have placed the call and is never redialed.
+                if req["from"] == settings.caller_number or not telnyx_io.unverified_caller(exc):
+                    raise
+                log.warning("workspace caller ID refused as unverified; dialing on the shared line")
+                req = {**req, "from": settings.caller_number}
+                data = await in_carrier_pool(telnyx.post, "/calls", req)
             ccid = str(data["data"]["call_control_id"])
         except Exception as exc:  # noqa: BLE001 - never redialed
             log.warning("dial failed: %s", exc)

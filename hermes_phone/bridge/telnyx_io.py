@@ -26,7 +26,28 @@ GREETING_EVENTS = frozenset({"call.machine.premium.greeting.ended",
 
 
 class TelnyxError(Exception):
-    pass
+    """A carrier error. ``status`` is the HTTP status (0 when there was no answer) and ``codes`` the ``errors[].code`` values of
+    its body; the message carries neither the body nor a secret."""
+
+    def __init__(self, message: str, status: int = 0, codes: tuple[str, ...] = ()) -> None:
+        super().__init__(message)
+        self.status, self.codes = status, codes
+
+
+def error_codes(raw: bytes) -> tuple[str, ...]:
+    """The ``errors[].code`` values of a Telnyx error body (at most 10, each at most 20 characters); () when unreadable."""
+    try:
+        errors = json.loads(raw).get("errors")
+    except (ValueError, AttributeError):
+        return ()
+    if not isinstance(errors, list):
+        return ()
+    return tuple(str(e["code"])[:20] for e in errors[:10] if isinstance(e, dict) and isinstance(e.get("code"), (str, int)))
+
+
+def unverified_caller(exc: BaseException) -> bool:
+    """True for the carrier's 403 D51: the ``from`` number is neither ours nor verified. It is refused before anything rings."""
+    return isinstance(exc, TelnyxError) and exc.status == 403 and "D51" in exc.codes
 
 
 def verify_signature(public_key_b64: str, body: bytes, headers: Mapping[str, str],
@@ -71,7 +92,11 @@ class TelnyxClient:
             with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:  # noqa: S310
                 raw = resp.read()
         except urllib.error.HTTPError as exc:
-            raise TelnyxError(f"HTTP {exc.code}") from None
+            try:
+                raw = exc.read(8192)
+            except OSError:
+                raw = b""
+            raise TelnyxError(f"HTTP {exc.code}", int(exc.code), error_codes(raw)) from None
         except (urllib.error.URLError, OSError) as exc:
             raise TelnyxError(type(exc).__name__) from None
         try:
