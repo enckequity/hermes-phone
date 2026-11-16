@@ -118,6 +118,7 @@ class CallSession:
         # only once any response still running (the person_answered tool call) is done.
         self._gate = listening
         self._opening_retries = 0
+        self._spoke_during_opening = False
         self._open_when_done = False
         self._open_wait_since = 0.0
 
@@ -231,6 +232,8 @@ class CallSession:
         elif etype == "conversation.item.input_audio_transcription.completed":
             self._line("callee", ev.get("transcript", ""))
         elif etype == "input_audio_buffer.speech_stopped":
+            if self._opening_resp and not self._opening_done and not self.listening:
+                self._spoke_during_opening = True  # said while the opening played: reply after
             await self._send_opening()  # the callee finished their greeting
             if self._opening_done and self.question_open and not self.hung_up:
                 await self._hold_reply()  # the callee spoke while we wait for the user
@@ -252,7 +255,8 @@ class CallSession:
         """Per-response instructions REPLACE the session instructions in OpenAI Realtime, so
         every override carries the full call context (who, what for, facts, rules) plus the step.
         Without this the opening said "I don't have the details yet" (live call, Nov 5)."""
-        return rt.build_instructions(self.payload) + "\n\nCURRENT STEP (do this now):\n" + step
+        return (rt.build_instructions(self.payload, self.settings.asks_on_hold())
+                + "\n\nCURRENT STEP (do this now):\n" + step)
 
     async def _send_opening(self) -> None:
         """Forced opening (AI disclosure first), once: after the greeting or a silent timeout."""
@@ -272,6 +276,11 @@ class CallSession:
         self._opening_done = True
         await self._rt_send(rt.turn_detection_update(
             create_response=not self._hold_vad, interrupt_response=True))
+        if self._spoke_during_opening and not self._hold_vad and not self.response_active:
+            # The callee answered while the opening played ("Okay."): VAD could not reply then,
+            # so reply now instead of leaving dead air until they speak again (8 s live, #2872).
+            self._spoke_during_opening = False
+            await self._rt_send({"type": "response.create"})
 
     # ---- audio ---------------------------------------------------------------------------
     async def _on_audio_delta(self, ev: dict) -> None:
@@ -403,7 +412,8 @@ class CallSession:
             await self._rt_send({"type": "response.cancel"})
             self.response_active = False
         await self._tw_send({"event": "clear", "streamSid": self.stream_sid})
-        await self._rt_send(rt.mode_update(keys=True, listening=True))
+        await self._rt_send(rt.mode_update(keys=True, listening=True,
+                                           hold=self.settings.asks_on_hold()))
         # Whoever picks up next hears the forced opening with the disclosure, word for word,
         # even if the carrier spoke it before the hold or the opening was cut off by it.
         self.payload = {**self.payload, "opening_line": self._disclosure_line}
@@ -414,7 +424,8 @@ class CallSession:
     async def _leave_listening(self) -> None:
         self.listening = False
         self.store.add_event(self.call_id, "person_answered", {})
-        await self._rt_send(rt.mode_update(keys=True, listening=False))
+        await self._rt_send(rt.mode_update(keys=True, listening=False,
+                                           hold=self.settings.asks_on_hold()))
         await self._rt_send(rt.turn_detection_update(create_response=False,
                                                      interrupt_response=False))
         if self.response_active:  # the person_answered response: end it, open when it is done

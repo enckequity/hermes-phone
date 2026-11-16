@@ -611,7 +611,9 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
             if fresh and fresh["state"] == states.VOICEMAIL and _leaves(fresh):
                 await _disclose(iid, ccid)
         elif etype == "call.speak.ended":
-            if str(p.get("status") or "") == "completed":
+            if (ledger.by_internal(iid) or row).get("disclosure_requested_at") is None:
+                pass  # no carrier disclosure was requested on this call (a person hears the model's)
+            elif str(p.get("status") or "") == "completed":
                 store.set_disclosure(iid, True)  # only a fully played disclosure counts
                 await _start_stream(iid, ccid)
             else:  # cut off: the voice model never talks to someone who was not told
@@ -658,7 +660,11 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
             if not (_leaves(call) and result in telnyx_io.MACHINE_RESULTS):
                 await carrier(ccid, "hangup")  # a fax line: nothing to say to it
             return  # leaving a message: the stream starts once the greeting ended
-        await _disclose(iid, ccid)  # a person (or cannot tell): disclosure, then media
+        # A person (or cannot tell): the stream starts now and the model's forced opening says the
+        # disclosure word for word in its own voice, the first audio the person hears. The carrier's
+        # robotic speech plus the stream start after it added about 6.5 s of mismatched audio and
+        # silence (#2872); the carrier still speaks it only before a voicemail message.
+        await _start_stream(iid, ccid)
 
     async def _disclose(iid: str, ccid: str) -> None:
         """Play the fixed disclosure with the carrier's own speech before any model audio."""

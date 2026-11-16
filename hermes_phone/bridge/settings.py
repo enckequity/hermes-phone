@@ -92,6 +92,9 @@ class BridgeSettings:
     auth_url: str = ""  # HERMES_PHONE_BRIDGE_AUTH_URL: usage-token check; unset = path off
     overrides_raw: str = ""  # HERMES_PHONE_BRIDGE_OVERRIDES: JSON object or a path to one
     inbound_enabled: bool = False  # HERMES_PHONE_BRIDGE_INBOUND=1 mounts the inbound stub
+    # Mid-call questions put the callee on hold while the user answers. The shared bridge negotiates
+    # instead and calls back for a decision; HERMES_PHONE_HOLD_QUESTIONS=1 brings the hold back.
+    hold_questions: bool | None = None
     auth_timeout_s: float = 5.0
     trust_proxy: bool = False  # client IP from the first X-Forwarded-For entry (the gate's)
     transcript_retention_days: int = 30
@@ -150,6 +153,7 @@ class BridgeSettings:
             room_url=_room_url(env.get("HERMES_PHONE_BRIDGE_ROOM_URL")),
             room_key=creds["room_key"],
             inbound_enabled=(env.get("HERMES_PHONE_BRIDGE_INBOUND") or "").strip() == "1",
+            hold_questions=((env.get("HERMES_PHONE_HOLD_QUESTIONS") or "").strip() == "1") or None,
             telnyx_connection_id=env.get("TELNYX_CONNECTION_ID") or "",
             caller_number=env.get("HERMES_PHONE_CALLER_NUMBER") or "",
             telephony_usd_per_min=_rate(env.get("HERMES_PHONE_TELEPHONY_USD_PER_MIN")),
@@ -166,6 +170,9 @@ class BridgeSettings:
             trust_proxy=(env.get("HERMES_PHONE_BRIDGE_TRUST_PROXY") or "1").strip() != "0",
             environ={k: env[k] for k in (ALLOWLIST_ENV, ALLOW_ALL_ENV) if k in env},
         )
+
+    def asks_on_hold(self) -> bool:
+        return self.hold_questions if self.hold_questions is not None else not self.shared
 
     def missing_env(self) -> list[str]:
         """Names (never values) of required env vars that are unset."""

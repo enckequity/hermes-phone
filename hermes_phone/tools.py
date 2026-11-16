@@ -528,12 +528,16 @@ SCHEMAS: dict[str, dict] = {
                                               "user's request that the callee may need: "
                                               "person_to_see (the doctor, stylist or contact "
                                               "the user named), service, date, time window, "
-                                              "party size, booking name. The voice agent "
+                                              "party size, booking name, and what else is "
+                                              "acceptable if the preferred option is gone "
+                                              "(acceptable), so the agent can agree without "
+                                              "holding the line. The voice agent "
                                               "knows nothing else. e.g. {\"person_to_see\":"
                                               "\"Dr. Smith\",\"service\":\"teeth "
                                               "whitening\",\"day\":\"tomorrow\","
                                               "\"time_window\":\"11:00-14:00\","
-                                              "\"name\":\"Winch\"}"},
+                                              "\"acceptable\":\"afternoons that week if no "
+                                              "morning\",\"name\":\"Winch\"}"},
             "sensitive_fields": {"type": "array", "items": {"type": "string", "enum": list(
                 consent.SENSITIVE_FIELDS)}, "description": "Fields that need per-call consent"},
             "language": {"type": "string", "default": "en"},
