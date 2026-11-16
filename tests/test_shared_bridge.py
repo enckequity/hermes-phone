@@ -867,7 +867,7 @@ class Room:
         return R(json.dumps({"seconds": self.seconds} if body["action"] == "admit" else {"ok": True}).encode())
 
 
-def with_room(store, clock, monkeypatch, room, workspace_key="wa"):
+def with_room(store, clock, monkeypatch, room):
     monkeypatch.setattr(v1.urllib.request, "urlopen", room)
     return Shared(store, clock, room_url="http://127.0.0.1:8788/_internal/member-outbound", room_key="k-room")
 
@@ -905,7 +905,6 @@ def test_a_usage_workspace_without_a_gw_id_is_refused_and_one_with_it_uses_that_
     room = Room(seconds=300)
     sb = with_room(store, clock, monkeypatch, room)
     answers = {"body": '{"front_door_instance": "gw-0123456789ab"}'}
-    sb.app.state if False else None
     name, token = "t-0123456789", "ts_usg_" + "a" * 64
     authn = auth.Authenticator(signing_key=KEY, auth_url="http://auth.test", overrides={}, clock=clock,
                                http_get=lambda url, h, t: (200, answers["body"]))
@@ -916,3 +915,26 @@ def test_a_usage_workspace_without_a_gw_id_is_refused_and_one_with_it_uses_that_
                                 http_get=lambda url, h, t: (200, answers["body"])).check(f"Bearer {token}", name)
     assert ws2.gateway == ""
     assert auth.gateway_of('{"front_door_instance": "gw-ZZ"}') == "" and auth.gateway_of("nope") == ""
+
+
+def test_allowance_floor_and_refund_on_a_carrier_error(store, clock, monkeypatch):
+    for seconds, code in ((29, 422), (30, 201)):
+        room = Room(seconds=seconds)
+        sb = with_room(store, clock, monkeypatch, room)
+        assert sb.put(f"f{seconds}", aid=f"ap_{seconds:032x}").status_code == code
+        clock.advance(120)  # past the same-number redial gap
+    room = Room(seconds=300)
+    sb = with_room(store, clock, monkeypatch, room)
+    sb.tx.fail_dial = True
+    clock.advance(120)
+    assert sb.put("d1", aid=f"ap_{999:032x}").status_code != 201
+    wait_for(lambda: any(b["action"] == "close" for b, _ in room.sent))
+    assert [b for b, _ in room.sent if b["action"] == "close"][0]["seconds"] == 0  # nothing was dialed: the time is returned
+
+
+def test_room_url_must_be_loopback_http():
+    from hermes_phone.bridge.settings import _room_url
+    assert _room_url(None) == "" and _room_url("http://127.0.0.1:8788/_internal/member-outbound").startswith("http://127.0.0.1")
+    for bad in ("https://example.com/x", "http://evil.test/x", "http://127.0.0.1.evil.test/x", "ftp://127.0.0.1/x"):
+        with pytest.raises(ValueError):
+            _room_url(bad)

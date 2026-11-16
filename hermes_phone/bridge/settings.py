@@ -3,6 +3,7 @@ environment; the shared bridge (``from_shared_env``) reads them from credential 
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -33,6 +34,17 @@ def _read_creds(directory: str) -> dict[str, str]:
         except OSError:
             out[attr] = ""
     return out
+
+
+def _room_url(raw: str | None) -> str:
+    """The allowance service must be on this host (http, loopback): the bearer never leaves it, and a bad value turns the allowance
+    path off loudly via an empty string only when unset; anything else raises so a typo cannot silently disable the cap."""
+    raw = (raw or "").strip()
+    if not raw:
+        return ""
+    if not re.fullmatch(r"http://(127\.0\.0\.1|localhost|\[::1\])(:\d{2,5})?/[A-Za-z0-9_./-]*", raw):
+        raise ValueError("HERMES_PHONE_BRIDGE_ROOM_URL must be an http loopback URL")
+    return raw
 
 
 def _keep_days(raw: str | None) -> int:
@@ -135,7 +147,7 @@ class BridgeSettings:
             signing_key=creds["signing_key"],
             auth_url=(env.get("HERMES_PHONE_BRIDGE_AUTH_URL") or "").strip(),
             overrides_raw=env.get("HERMES_PHONE_BRIDGE_OVERRIDES") or "",
-            room_url=(env.get("HERMES_PHONE_BRIDGE_ROOM_URL") or "").strip(),
+            room_url=_room_url(env.get("HERMES_PHONE_BRIDGE_ROOM_URL")),
             room_key=creds["room_key"],
             inbound_enabled=(env.get("HERMES_PHONE_BRIDGE_INBOUND") or "").strip() == "1",
             telnyx_connection_id=env.get("TELNYX_CONNECTION_ID") or "",

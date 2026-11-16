@@ -372,7 +372,9 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
             log.warning("dial failed: %s", exc)
             store.set_result_once(iid, {"outcome": "failed", "reason": "dial_failed",
                                         "summary": ERRORS["dial_failed"][1]}, "failed")
-            if settings.room_url:  # nothing was dialed: give the reserved time back
+            if settings.room_url and isinstance(exc, telnyx_io.TelnyxError):
+                # The carrier answered with an error, so nothing was dialed: give the reserved time back. A timeout may still have
+                # placed the call, so that stays charged at the grant until it is reported.
                 await in_carrier_pool(report_close, iid, t.name, 0)
             if states.can_transition(store.get_call(iid)["state"], states.FAILED):  # not aborted
                 states.transition(store, iid, states.FAILED, reason="dial_failed",
@@ -395,7 +397,7 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
             with urllib.request.urlopen(req, timeout=settings.room_timeout_s) as resp:  # noqa: S310
                 out = json.loads(resp.read(4096).decode("utf-8", "replace"))
             return out if isinstance(out, dict) else None
-        except (urllib.error.URLError, OSError, ValueError):
+        except Exception:  # noqa: BLE001 - any failure to ask or parse means no answer
             return None
 
     def report_close(call_id: str, workspace: str, seconds: int) -> None:
