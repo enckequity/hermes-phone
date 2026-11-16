@@ -1121,3 +1121,45 @@ def test_room_url_must_be_loopback_http():
     for bad in ("https://example.com/x", "http://evil.test/x", "http://127.0.0.1.evil.test/x", "ftp://127.0.0.1/x"):
         with pytest.raises(ValueError):
             _room_url(bad)
+
+
+# ---- dialed report: a callback to the shared line reaches the workspace that called (teamshift#2907) ----------------
+def test_a_placed_dial_is_reported_with_the_allowance_key_number_callee_and_goal(store, clock, monkeypatch):
+    room = Room(seconds=300)
+    sb = with_room(store, clock, monkeypatch, room)
+    iid, _ = sb.dial("c1", goal="Book a table for 4\non Friday " + "x" * 300)
+    wait_for(lambda: any(b["action"] == "dialed" for b, _ in room.sent))
+    dialed = [(b, h) for b, h in room.sent if b["action"] == "dialed"]
+    assert len(dialed) == 1 and dialed[0][1] == "Bearer k-room"
+    body = dialed[0][0]
+    assert set(body) == {"action", "call_id", "workspace", "number", "callee", "about"}
+    assert (body["call_id"], body["workspace"], body["number"], body["callee"]) == (iid, "wa", TEST_NUMBER, "Bella Napoli")
+    assert body["about"].startswith("Book a table for 4 on Friday ") and len(body["about"]) == v1.DIALED_ABOUT_MAX
+    sb.end(iid)  # the hangup still meters the call; no second dialed report
+    wait_for(lambda: any(b["action"] == "close" for b, _ in room.sent))
+    assert sum(b["action"] == "dialed" for b, _ in room.sent) == 1
+
+
+def test_no_dialed_report_when_the_carrier_refused_the_dial(store, clock, monkeypatch):
+    room = Room(seconds=300)
+    sb = with_room(store, clock, monkeypatch, room)
+    sb.tx.fail_dial = True
+    assert sb.put("d1").status_code == 502
+    wait_for(lambda: any(b["action"] == "close" for b, _ in room.sent))
+    assert not [b for b, _ in room.sent if b["action"] == "dialed"]
+
+
+def test_an_undelivered_dialed_report_never_fails_or_blocks_the_call(store, clock, monkeypatch):
+    class Flaky(Room):
+        def __call__(self, req, timeout=0):
+            if json.loads(req.data.decode())["action"] == "dialed":
+                import urllib.error
+                self.sent.append((json.loads(req.data.decode()), None))
+                raise urllib.error.URLError("down")
+            return super().__call__(req, timeout)
+    room = Flaky(seconds=300)
+    sb = with_room(store, clock, monkeypatch, room)
+    r = sb.put("c1")
+    assert r.status_code == 201 and r.json()["state"] == states.DIALING
+    wait_for(lambda: any(b["action"] == "dialed" for b, _ in room.sent))
+
