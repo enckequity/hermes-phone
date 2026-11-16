@@ -622,10 +622,19 @@ def test_media_frames_map_both_ways(sb):
                                            "payload": MULAW_20MS}}))
         wait_for(lambda: sb.rt.of("input_audio_buffer.append"))
         assert sb.rt.of("input_audio_buffer.append")[0]["audio"] == MULAW_20MS
+        early = base64.b64encode(b"\x03" * 160).decode()  # before the opening: never played
+        sb.rt.push({"type": "response.output_audio.delta", "response_id": "r0", "item_id": "e0",
+                    "delta": early})
+        sb.rt.push({"type": "input_audio_buffer.speech_stopped"})  # "Hello?" -> forced opening
+        wait_for(lambda: sb.rt.of("response.create"))
+        sb.rt.push({"type": "response.created", "response": {"id": "rO"}})
         out = base64.b64encode(b"\xff" * 320).decode()
-        sb.rt.push({"type": "response.output_audio.delta", "item_id": "it1", "delta": out})
+        sb.rt.push({"type": "response.output_audio.delta", "response_id": "rO", "item_id": "it1",
+                    "delta": out})
         assert json.loads(ws.receive_text()) == {"event": "media", "media": {"payload": out}}
         assert json.loads(ws.receive_text())["event"] == "mark"
+        # the opening (disclosure) is never cut off: barge-in only works once it is done
+        sb.rt.push({"type": "response.done", "response": {"id": "rO"}})
         sb.rt.push({"type": "input_audio_buffer.speech_started"})  # barge-in
         assert json.loads(ws.receive_text()) == {"event": "clear"}
         ws.send_text(json.dumps({"event": "stop", "stream_id": "st-1"}))

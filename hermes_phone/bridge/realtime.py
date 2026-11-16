@@ -231,8 +231,9 @@ def build_instructions(payload: dict, hold: bool = True) -> str:
                                    for r in NEGOTIATE_RULES]),
         "5. Do not hang up early. Before calling end_call you must, in this order: (a) confirm "
         "the key details back in one sentence (date, time, party size, name); (b) give the "
-        "booking name from FACTS if they did not ask for it (if there is no name in FACTS use "
-        "ask_user); (c) ask for a confirmation number or reference if the business has one; "
+        "booking name from FACTS if they did not ask for it (if there is no name in FACTS "
+        + ("use ask_user" if hold else f"give {payload['user_name']}") + "); (c) ask"
+        " for a confirmation number or reference if the business has one; "
         "(d) thank them and say goodbye. Only after the goodbye call end_call, exactly once, "
         "with the real outcome and only what was actually agreed.",
         "5b. A bare \"OK\", \"sure\" or \"book it\" is not a confirmation: repeat the "
