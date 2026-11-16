@@ -631,3 +631,12 @@ def test_instructions_tell_the_agent_to_accept_fitting_offers_not_ask():
     assert "booking name is the user_name or name fact" in text
     desc = next(t for t in rt.TOOLS if t["name"] == "ask_user")["description"]
     assert "Never use it for an offer that fits the facts" in desc and "1 person" in desc
+
+
+def test_negotiation_mode_never_points_at_ask_user():
+    payload = {"callee_name": "Dan", "user_name": "Winch", "goal": "book", "facts": {},
+               "opening_line": "Hi", "language": "en"}
+    assert "use ask_user" in rt.build_instructions(payload, hold=True)
+    text = rt.build_instructions(payload, hold=False)
+    assert "ask_user" not in text  # the tool is not offered on the shared bridge (PR #10 review)
+    assert "if there is no name in FACTS give Winch" in text

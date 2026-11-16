@@ -43,7 +43,7 @@ def check_keys(keys: str, facts: dict, free_used: int = 0) -> tuple[str, int]:
     if len(digits) > FREE_KEY_DIGITS and digits in allowed:
         return "", 0
     if len(digits) > FREE_KEY_DIGITS:
-        return "That number is not in your facts; ask the user with ask_user instead.", 0
+        return "That number is not in your facts; you cannot enter it.", 0
     if free_used + len(digits) > FREE_DIGITS_PER_CALL:
         return "No more keypad entries on this call; end_call with needs_followup.", 0
     return "", len(digits)
@@ -116,8 +116,11 @@ class CallSession:
         self._dropped_audio = False
         # After listening, only the forced opening's audio plays until it finished, and it starts
         # only once any response still running (the person_answered tool call) is done.
-        self._gate = listening
+        # Shared bridge: no carrier speech precedes a person's call any more, so the model is muted
+        # until its forced opening (with the disclosure) is the response playing (#2872 review).
+        self._gate = listening or (settings.shared and not disclosed)
         self._opening_retries = 0
+        self._spoke_during_opening = False
         self._open_when_done = False
         self._open_wait_since = 0.0
 
@@ -231,6 +234,8 @@ class CallSession:
         elif etype == "conversation.item.input_audio_transcription.completed":
             self._line("callee", ev.get("transcript", ""))
         elif etype == "input_audio_buffer.speech_stopped":
+            if self._opening_resp and not self._opening_done and not self.listening:
+                self._spoke_during_opening = True  # said while the opening played: reply after
             await self._send_opening()  # the callee finished their greeting
             if self._opening_done and self.question_open and not self.hung_up:
                 await self._hold_reply()  # the callee spoke while we wait for the user
@@ -252,7 +257,8 @@ class CallSession:
         """Per-response instructions REPLACE the session instructions in OpenAI Realtime, so
         every override carries the full call context (who, what for, facts, rules) plus the step.
         Without this the opening said "I don't have the details yet" (live call, Nov 5)."""
-        return rt.build_instructions(self.payload) + "\n\nCURRENT STEP (do this now):\n" + step
+        return (rt.build_instructions(self.payload, self.settings.asks_on_hold())
+                + "\n\nCURRENT STEP (do this now):\n" + step)
 
     async def _send_opening(self) -> None:
         """Forced opening (AI disclosure first), once: after the greeting or a silent timeout."""
@@ -272,6 +278,12 @@ class CallSession:
         self._opening_done = True
         await self._rt_send(rt.turn_detection_update(
             create_response=not self._hold_vad, interrupt_response=True))
+        if (self._spoke_during_opening and not self._hold_vad and not self.response_active
+                and not self._end_pending and self._closing_since is None):
+            # The callee answered while the opening played ("Okay."): VAD could not reply then,
+            # so reply now instead of leaving dead air until they speak again (8 s live, #2872).
+            self._spoke_during_opening = False
+            await self._rt_send({"type": "response.create"})
 
     # ---- audio ---------------------------------------------------------------------------
     async def _on_audio_delta(self, ev: dict) -> None:
@@ -349,6 +361,9 @@ class CallSession:
                     "output": json.dumps({"status": "ok"})}})
                 await self._enter_listening("hold")
                 return
+            elif name == "ask_user" and not self.settings.asks_on_hold():
+                output = {"error": "No hold on this call: pencil it in and end_call with "
+                                   "needs_followup, as your rules say."}
             elif name == "ask_user":
                 await self._on_ask_user(call_id, args)
                 return  # the output is sent later (answer, decline or timeout)
@@ -403,18 +418,21 @@ class CallSession:
             await self._rt_send({"type": "response.cancel"})
             self.response_active = False
         await self._tw_send({"event": "clear", "streamSid": self.stream_sid})
-        await self._rt_send(rt.mode_update(keys=True, listening=True))
+        await self._rt_send(rt.mode_update(keys=True, listening=True,
+                                           hold=self.settings.asks_on_hold()))
         # Whoever picks up next hears the forced opening with the disclosure, word for word,
         # even if the carrier spoke it before the hold or the opening was cut off by it.
         self.payload = {**self.payload, "opening_line": self._disclosure_line}
         self._opening_sent = self._opening_done = False
         self._opening_resp = ""
         self._gate = True
+        self._spoke_during_opening = False
 
     async def _leave_listening(self) -> None:
         self.listening = False
         self.store.add_event(self.call_id, "person_answered", {})
-        await self._rt_send(rt.mode_update(keys=True, listening=False))
+        await self._rt_send(rt.mode_update(keys=True, listening=False,
+                                           hold=self.settings.asks_on_hold()))
         await self._rt_send(rt.turn_detection_update(create_response=False,
                                                      interrupt_response=False))
         if self.response_active:  # the person_answered response: end it, open when it is done
@@ -630,6 +648,10 @@ class CallSession:
                     self.store.add_event(self.call_id, "opening_retry", {})
                     self._opening_sent = False
                     await self._send_opening()
+                elif self._gate and not self._opening_resp:  # never spoke the disclosure: end
+                    await self._finish(states.FAILED, "voice_unavailable", "failed",
+                                       "The call could not start its introduction.")
+                    return
                 else:
                     self._gate = False  # response.done never arrived: do not stay mute or deaf
                     await self._opening_finished()
@@ -663,7 +685,8 @@ class CallSession:
             wrap_at = (self.max_duration_s - self.settings.wrapup_lead_s
                        if self.max_duration_s >= 60 else self.max_duration_s / 2)
             if (elapsed >= wrap_at and not self.wrapup_sent and not self.question_open
-                    and self._closing_since is None and not self.listening):
+                    and self._closing_since is None and not self.listening
+                    and (self._opening_done or not self._gate)):
                 self.wrapup_sent = True
                 self.store.add_event(self.call_id, "wrapup", {"elapsed_s": int(elapsed)})
                 await self._rt_send({"type": "response.create", "response": {

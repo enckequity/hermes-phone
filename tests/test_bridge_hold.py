@@ -49,8 +49,22 @@ def test_barge_in_during_the_opening_is_ignored_and_never_reopens(qh):
         wait_for(lambda: len(td_updates(qh)) == 2)
     assert td_updates(qh)[1] == {"type": "server_vad", "create_response": True,
                                  "interrupt_response": True}
-    assert len(qh.rt.of("response.create")) == 1
+    # Never a second opening; the words said during it get one plain reply once it is done, so the
+    # callee is not left in dead air (8 s on the live demo, teamshift#2872).
+    creates = qh.rt.of("response.create")
+    assert len(creates) == 2 and "response" not in creates[1]
     assert ws is not None
+
+
+def test_no_extra_reply_when_nobody_spoke_during_the_opening(qh):
+    with live(qh):
+        qh.rt.push({"type": "input_audio_buffer.speech_stopped"})  # the greeting -> opening
+        wait_for(lambda: qh.rt.of("response.create"))
+        qh.rt.push({"type": "response.created", "response": {"id": "rO"}})
+        qh.rt.push({"type": "response.done", "response": {"id": "rO"}})
+        wait_for(lambda: len(td_updates(qh)) == 2)
+        time.sleep(0.1)
+    assert len(qh.rt.of("response.create")) == 1
 
 
 def test_opening_lock_has_a_timeout_if_response_done_never_comes(qh, clock):

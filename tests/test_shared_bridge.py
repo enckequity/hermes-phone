@@ -147,7 +147,6 @@ def start_frames(cc: str) -> list[str]:
 def answered_human(sb: Shared, iid: str) -> None:
     sb.event(iid, "call.answered")
     sb.event(iid, "call.machine.premium.detection.ended", result="human_residence")
-    sb.event(iid, "call.speak.ended", status="completed")
 
 
 # ---- tenancy ----------------------------------------------------------------------------
@@ -347,17 +346,12 @@ def test_dial_request_shape(sb):
 
 
 # ---- answering machine detection ------------------------------------------------------------
-def test_stream_starts_only_after_human_result(sb):
+def test_stream_starts_only_after_human_result_with_no_carrier_speech(sb):
     iid, _ = sb.dial("c1")
     sb.event(iid, "call.answered")
     assert not sb.tx.actions("streaming_start")
     sb.event(iid, "call.machine.premium.detection.ended", result="human_business")
-    (_, speak), = sb.tx.actions("speak")  # the fixed disclosure plays before any model audio
-    assert speak["payload"] == "Hi, this is an AI assistant calling on behalf of Acme Plumbing."
-    assert not sb.tx.actions("streaming_start")
-    assert sb.store.get_call(iid)["disclosure_spoken"] is None
-    sb.event(iid, "call.speak.ended", status="completed")
-    assert sb.store.get_call(iid)["disclosure_spoken"]
+    assert not sb.tx.actions("speak")  # the model says the disclosure, in its own voice (#2872)
     (path, body), = sb.tx.actions("streaming_start")
     assert path == "/calls/v3%3Acc1/actions/streaming_start"
     url = urlsplit(body["stream_url"])
@@ -366,18 +360,21 @@ def test_stream_starts_only_after_human_result(sb):
         "stream_track": "inbound_track", "stream_bidirectional_mode": "rtp",
         "stream_bidirectional_codec": "PCMU"}
     sb.event(iid, "call.machine.premium.detection.ended", result="human_business")
-    sb.event(iid, "call.speak.ended", status="completed")
     assert len(sb.tx.actions("streaming_start")) == 1  # duplicate webhook
-    assert len(sb.tx.actions("speak")) == 1
-
-
-def test_cut_off_disclosure_hangs_up_without_stream(sb):
-    iid, _ = sb.dial("c1")
-    sb.event(iid, "call.answered")
-    sb.event(iid, "call.machine.premium.detection.ended", result="human_residence")
-    sb.event(iid, "call.speak.ended", status="call_hangup")
-    assert not sb.tx.actions("streaming_start") and len(sb.tx.actions("hangup")) == 1
-    assert not sb.store.get_call(iid)["disclosure_spoken"]
+    sb.event(iid, "call.speak.ended", status="completed")  # stray: no disclosure was requested
+    assert sb.store.get_call(iid)["disclosure_spoken"] is None
+    with sb.client.websocket_connect(f"/v1/media/{iid}?token={sb.stream_token()}") as ws:
+        for f in start_frames(sb.store.get_call(iid)["provider_sid"]):
+            ws.send_text(f)
+        wait_for(lambda: sb.rt.of("session.update"))
+        sess = sb.rt.of("session.update")[0]["session"]
+        assert "ask_user" not in [t["name"] for t in sess["tools"]]  # negotiates, never holds
+        assert "pencil that in" in sess["instructions"]
+        sb.rt.push({"type": "input_audio_buffer.speech_stopped"})  # "Hello?"
+        wait_for(lambda: sb.rt.of("response.create"))
+        assert v1.disclosure("Acme Plumbing") in sb.rt.of("response.create")[0]["response"][
+            "instructions"]
+        ws.send_text(json.dumps({"event": "stop", "stream_id": "st-1"}))
 
 
 def _fn(name: str, call_id: str, **args) -> dict:
@@ -625,18 +622,28 @@ def test_media_frames_map_both_ways(sb):
                                            "payload": MULAW_20MS}}))
         wait_for(lambda: sb.rt.of("input_audio_buffer.append"))
         assert sb.rt.of("input_audio_buffer.append")[0]["audio"] == MULAW_20MS
+        early = base64.b64encode(b"\x03" * 160).decode()  # before the opening: never played
+        sb.rt.push({"type": "response.output_audio.delta", "response_id": "r0", "item_id": "e0",
+                    "delta": early})
+        sb.rt.push({"type": "input_audio_buffer.speech_stopped"})  # "Hello?" -> forced opening
+        wait_for(lambda: sb.rt.of("response.create"))
+        sb.rt.push({"type": "response.created", "response": {"id": "rO"}})
         out = base64.b64encode(b"\xff" * 320).decode()
-        sb.rt.push({"type": "response.output_audio.delta", "item_id": "it1", "delta": out})
+        sb.rt.push({"type": "response.output_audio.delta", "response_id": "rO", "item_id": "it1",
+                    "delta": out})
         assert json.loads(ws.receive_text()) == {"event": "media", "media": {"payload": out}}
         assert json.loads(ws.receive_text())["event"] == "mark"
+        # the opening (disclosure) is never cut off: barge-in only works once it is done
+        sb.rt.push({"type": "response.done", "response": {"id": "rO"}})
         sb.rt.push({"type": "input_audio_buffer.speech_started"})  # barge-in
         assert json.loads(ws.receive_text()) == {"event": "clear"}
         ws.send_text(json.dumps({"event": "stop", "stream_id": "st-1"}))
     wait_for(lambda: sb.store.get_call(iid)["state"] == states.COMPLETED)
     sess = sb.rt.of("session.update")[0]["session"]
     assert sess["audio"]["input"]["format"] == {"type": "audio/pcmu"}
-    assert "Hi, this is an AI assistant" not in json.dumps(sb.rt.sent)
-    assert "recorded message already told the callee" in json.dumps(sb.rt.sent)
+    # no carrier speech for a person: the model's own opening carries the disclosure
+    assert v1.disclosure("Acme Plumbing") in json.dumps(sb.rt.sent)
+    assert "recorded message already told the callee" not in json.dumps(sb.rt.sent)
 
 
 def test_one_time_media_token_reuse_refused(sb):
