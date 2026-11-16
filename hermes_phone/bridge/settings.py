@@ -20,7 +20,8 @@ SHARED_DB_PATH = "/data/phone-bridge.db"
 SHARED_PORT = 8790
 # Shared bridge secrets: one file each under $CREDENTIALS_DIRECTORY, never plain env.
 CRED_FILES = {"openai_api_key": "openai_api_key", "telnyx_api_key": "telnyx_api_key",
-              "telnyx_public_key": "telnyx_public_key", "signing_key": "bridge_signing_key"}
+              "telnyx_public_key": "telnyx_public_key", "signing_key": "bridge_signing_key",
+              "room_key": "member_pin_key"}
 
 
 def _read_creds(directory: str) -> dict[str, str]:
@@ -82,6 +83,9 @@ class BridgeSettings:
     auth_timeout_s: float = 5.0
     trust_proxy: bool = False  # client IP from the first X-Forwarded-For entry (the gate's)
     transcript_retention_days: int = 30
+    room_url: str = ""  # HERMES_PHONE_BRIDGE_ROOM_URL: loopback allowance service (admit/close); unset = no monthly allowance
+    room_key: str = ""  # bearer for it, from the member_pin_key credential file
+    room_timeout_s: float = 4.0
     telnyx_api_key: str = ""
     telnyx_connection_id: str = ""
     telnyx_public_key: str = ""  # base64 Ed25519 key that signs webhooks
@@ -131,6 +135,8 @@ class BridgeSettings:
             signing_key=creds["signing_key"],
             auth_url=(env.get("HERMES_PHONE_BRIDGE_AUTH_URL") or "").strip(),
             overrides_raw=env.get("HERMES_PHONE_BRIDGE_OVERRIDES") or "",
+            room_url=(env.get("HERMES_PHONE_BRIDGE_ROOM_URL") or "").strip(),
+            room_key=creds["room_key"],
             inbound_enabled=(env.get("HERMES_PHONE_BRIDGE_INBOUND") or "").strip() == "1",
             telnyx_connection_id=env.get("TELNYX_CONNECTION_ID") or "",
             caller_number=env.get("HERMES_PHONE_CALLER_NUMBER") or "",
