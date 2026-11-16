@@ -47,6 +47,7 @@ _NAME_DROP_RE = re.compile(r"[^A-Za-z0-9 &'.,-]")  # spoken and prompted names: 
 CALL_OK_STATES = frozenset({states.DIALING, states.RINGING, states.IN_PROGRESS})
 ALLOWANCE_FLOOR_S = 30  # less than this much monthly allowance left is no call
 DURATION_MARGIN_S = 60  # carrier-side time limit = our cap + this, as a backstop only
+DIALED_ABOUT_MAX = 200  # characters of the call goal sent with a dialed report (teamshift#2907)
 PAGE = 500
 CLIENT_PER_MIN = 60  # per client IP, before auth
 WORKSPACE_PER_MIN = 60  # per verified workspace, after auth
@@ -386,6 +387,13 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
                                   outcome="failed")
             return error("dial_failed")
         store.update_call(iid, provider_sid=ccid)
+        if settings.room_url and key:
+            # A business that calls the shared line back reaches the workspace that called it (enckequity/teamshift#2907).
+            # Sent once the carrier took the dial (even an unanswered call shows up as a missed call); best effort, off the loop.
+            call = store.get_call(iid)
+            about = " ".join(str(call.get("goal") or "").split())[:DIALED_ABOUT_MAX]
+            in_background(report_dialed, {"action": "dialed", "call_id": iid, "workspace": key, "number": e164,
+                                          "callee": str(call.get("callee_name") or "")[:200], "about": about})
         if store.hangup_requested(iid):  # the user hung up while we were dialing
             await carrier(ccid, "hangup")
         return JSONResponse({"call_id": call_id, "state": states.DIALING,
@@ -404,6 +412,15 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
             return out if isinstance(out, dict) else None
         except Exception:  # noqa: BLE001 - any failure to ask or parse means no answer
             return None
+
+    def in_background(fn: Callable[..., Any], *args: Any) -> None:
+        task = asyncio.ensure_future(in_carrier_pool(fn, *args))
+        background.add(task)
+        task.add_done_callback(background.discard)
+
+    def report_dialed(body: dict) -> None:
+        if room_call(body) is None:
+            log.warning("dialed report for %s not delivered; a callback reaches the public line only", body["call_id"])
 
     def report_close(call_id: str, workspace: str, seconds: int) -> None:
         if settings.room_url:
@@ -599,9 +616,7 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
             answered = fresh.get("answered_at") is not None
             secs = int(round(now - fresh["answered_at"])) if answered else 0
             if settings.room_url:  # meter this call against the workspace's allowance (never blocks the event loop)
-                loop_task = asyncio.ensure_future(in_carrier_pool(report_close, iid, str(fresh.get("workspace")), secs))
-                background.add(loop_task)
-                loop_task.add_done_callback(background.discard)
+                in_background(report_close, iid, str(fresh.get("workspace")), secs)
             apply_status(store, iid, {
                 "CallStatus": telnyx_io.hangup_status(str(p.get("hangup_cause") or ""), answered),
                 "CallSid": ccid, "CallDuration": str(secs)})
