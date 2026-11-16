@@ -285,6 +285,11 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
             log.warning("call action %s failed: %s", name, exc)
             return False
 
+    async def send_digits(ccid: str, keys: str, command_id: str) -> bool:
+        # command_id makes a retried command a no-op at the carrier (one press per tool call).
+        return await carrier(ccid, "send_dtmf", {"digits": keys, "duration_millis": 250,
+                                                 "command_id": command_id})
+
     def quiet_hangup(ccid: str) -> None:
         try:
             telnyx_io.action(telnyx, ccid, "hangup", None)
@@ -602,15 +607,31 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
                 "CallSid": ccid, "CallDuration": str(secs)})
         return JSONResponse({"ok": True})
 
+    def _listens(row: dict, call: dict) -> bool:
+        """A stream that was started without a spoken disclosure (menu or machine): listening.
+        From the ledger, so a restart or another worker gets the same answer."""
+        fresh = ledger.by_internal(row["internal_id"]) or row
+        return (fresh.get("disclosure_requested_at") is not None
+                and not call.get("disclosure_spoken") and call["state"] != states.VOICEMAIL)
+
     def _leaves(call: dict) -> bool:
         return bool(call["brief"]["limits"].get("voicemail_message"))
 
     async def _on_amd(iid: str, call: dict, ccid: str, result: str) -> None:
         store.add_event(iid, "answering_machine", {"result": result[:32]})
+        if result in telnyx_io.MACHINE_RESULTS and not _leaves(call):
+            # A business's phone menu sounds like a machine. Listen silently (no disclosure yet,
+            # the model's audio is dropped): it presses keys through the menu, and a person who
+            # picks up hears the forced opening with the disclosure first. A voicemail greeting
+            # ends the call without a message.
+            if ledger.stamp(iid, "disclosure_requested_at", clock()):  # media sees: not spoken
+                store.add_event(iid, "listen_start", {})
+                await _start_stream(iid, ccid)
+            return
         if result in telnyx_io.MACHINE_RESULTS or result.startswith("fax"):
             apply_status(store, iid, {"AnsweredBy": "machine_start", "CallSid": ccid})
             if not (_leaves(call) and result in telnyx_io.MACHINE_RESULTS):
-                await carrier(ccid, "hangup")  # no message: matches upstream voicemail behavior
+                await carrier(ccid, "hangup")  # a fax line: nothing to say to it
             return  # leaving a message: the stream starts once the greeting ended
         await _disclose(iid, ccid)  # a person (or cannot tell): disclosure, then media
 
@@ -693,7 +714,10 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
         session = CallSession(ws=telnyx_io.MediaSocket(ws), call=call, store=store,
                               settings=per_call, connect=connect,
                               twilio_client_factory=lambda: telnyx_io.Hangup(telnyx),
-                              clock=clock, disclosed=bool(call.get("disclosure_spoken")))
+                              clock=clock, disclosed=bool(call.get("disclosure_spoken")),
+                              press_keys=(lambda keys, cid: send_digits(ccid, keys, cid))
+                              if ccid else None,
+                              listening=_listens(row, call))
         if call["state"] == states.VOICEMAIL:
             session.notify_voicemail("machine_end_beep")  # stream began after the greeting
         sessions[iid] = session

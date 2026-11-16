@@ -107,6 +107,65 @@ TOOLS: list[dict] = [
 ]
 
 
+# Phone menus and hold (listening mode): the model may only press keys, wait, report that a person
+# picked up, or end the call. Its audio is dropped by the session until a person answers, so the AI
+# disclosure is always the first thing a person hears.
+PRESS_KEYS = {"type": "function", "name": "press_keys",
+              "description": ("Press keys on the phone keypad, for a phone menu option or an "
+                              "extension. Digits 0-9, * and #; w is a half-second pause. Up to 4 "
+                              "digits freely; a longer number only if it is one of your facts."),
+              "parameters": {"type": "object", "properties": {
+                  "keys": {"type": "string", "description": "e.g. \"2\" or \"0\" or \"1w3\"."},
+                  "why": {"type": "string", "description": "The menu option you chose, briefly."}},
+                  "required": ["keys"]}}
+KEEP_WAITING = {"type": "function", "name": "keep_waiting",
+                "description": ("Nothing to do yet: a recording, hold music or a menu that is "
+                                "still playing. Stay silent and keep listening."),
+                "parameters": {"type": "object", "properties": {}}}
+PERSON_ANSWERED = {"type": "function", "name": "person_answered",
+                   "description": ("A live person is now on the line and speaking to you (not a "
+                                   "recording). You will then introduce yourself."),
+                   "parameters": {"type": "object", "properties": {}}}
+ON_HOLD = {"type": "function", "name": "on_hold",
+           "description": ("You were put on hold, transferred, or reached a recording or phone "
+                           "menu. Stop talking until a person speaks to you again."),
+           "parameters": {"type": "object", "properties": {}}}
+LISTEN_END_OUTCOMES = ["voicemail", "failed", "needs_followup"]
+LISTEN_END_CALL = {"type": "function", "name": "end_call",
+                   "description": ("End the call without speaking: voicemail (a recording asks you "
+                                   "to leave a message), failed (the menu has no way to reach the "
+                                   "goal, or the line is closed) or needs_followup."),
+                   "parameters": {"type": "object", "properties": {
+                       "outcome": {"type": "string", "enum": LISTEN_END_OUTCOMES},
+                       "next_steps": {"type": "string"}}, "required": ["outcome"]}}
+LISTEN_INSTRUCTIONS = (
+    "LISTENING MODE: you are not talking to a person yet. You hear a phone menu, a recording or "
+    "hold music. Do not speak at all; act only through tools. After each prompt: if the menu "
+    "offers an option that fits what you are calling for, press_keys with it (prefer a "
+    "department or 'speak to someone' option that fits the goal; press 0 only if nothing fits "
+    "and the menu has repeated). If the prompt is still playing, music, or 'please hold', "
+    "keep_waiting. If a live person greets you or speaks to you, person_answered. If a recording "
+    "asks you to leave a message, or the business is closed, end_call (voicemail or failed). "
+    "Never press keys to enter card, account, ID or other numbers that are not in your facts.")
+
+
+def tools_for(*, keys: bool, listening: bool) -> list[dict]:
+    if listening:
+        return [PRESS_KEYS, KEEP_WAITING, PERSON_ANSWERED, LISTEN_END_CALL]
+    return TOOLS + ([PRESS_KEYS, ON_HOLD] if keys else [])
+
+
+def mode_update(*, keys: bool, listening: bool) -> dict:
+    """Partial session.update for listening (menus, hold: tools only, VAD replies with a tool call,
+    no barge-in) or talking (the normal call tools)."""
+    session: dict = {"type": "realtime", "tools": tools_for(keys=keys, listening=listening),
+                     "tool_choice": "required" if listening else "auto"}
+    if listening:
+        session["audio"] = {"input": {"turn_detection": _turn_detection(
+            create_response=True, interrupt_response=False)}}
+    return {"type": "session.update", "session": session}
+
+
 def build_instructions(payload: dict) -> str:
     facts = json.dumps(payload.get("facts", {}), ensure_ascii=False, sort_keys=True)
     lines = [
@@ -158,6 +217,9 @@ def build_instructions(payload: dict) -> str:
     else:
         lines.append("7. If you reach voicemail, do not leave a message; call end_call with "
                      "outcome voicemail.")
+    lines.append("8. If a person puts you on hold or transfers you, or you hear a phone menu, a "
+                 "recording or hold music, call on_hold if you have it and stay silent; never "
+                 "talk over hold music or a recording.")
     return "\n".join(lines)
 
 
@@ -220,7 +282,8 @@ VOICEMAIL_INSTRUCTIONS = ("You have reached an answering machine. Leave a short 
                           "with outcome voicemail.")
 
 
-def session_update(settings: BridgeSettings, payload: dict) -> dict:
+def session_update(settings: BridgeSettings, payload: dict, *, keys: bool = False,
+                   listening: bool = False) -> dict:
     return {"type": "session.update", "session": {
         "type": "realtime",
         "model": settings.model,
@@ -231,12 +294,12 @@ def session_update(settings: BridgeSettings, payload: dict) -> dict:
                       "transcription": {"model": TRANSCRIPTION_MODEL},
                       # no auto-reply and no barge-in until the forced opening (AI
                       # disclosure) has been fully spoken
-                      "turn_detection": _turn_detection(create_response=False,
+                      "turn_detection": _turn_detection(create_response=listening,
                                                         interrupt_response=False)},
             "output": {"format": dict(AUDIO_FORMAT), "voice": settings.voice},
         },
-        "tools": TOOLS,
-        "tool_choice": "auto",
+        "tools": tools_for(keys=keys, listening=listening),
+        "tool_choice": "required" if listening else "auto",
     }}
 
 
