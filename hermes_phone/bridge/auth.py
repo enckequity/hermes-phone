@@ -49,6 +49,7 @@ class Workspace:
     daily_cap: int = DEFAULT_DAILY_CAP
     tz: str = DEFAULT_TZ
     gateway: str = ""  # front-door instance (gw-...) from the auth service's reply: the key of the shared call allowance
+    caller: str = ""  # the workspace's own verified caller ID from the same reply (enckequity/teamshift#2908); "" = the shared line
 
 
 class Window:
@@ -142,6 +143,19 @@ def gateway_of(body: str) -> str:
     return value if isinstance(value, str) and GATEWAY_RE.match(value) else ""
 
 
+CALLER_RE = re.compile(r"^\+[1-9][0-9]{7,14}$")
+
+
+def caller_of(body: str) -> str:
+    """The ``caller_number`` of the auth service's usage reply (sent only once the workspace verified it), or "" when absent or
+    malformed."""
+    try:
+        value = json.loads(body).get("caller_number")
+    except (ValueError, AttributeError):
+        return ""
+    return value if isinstance(value, str) and CALLER_RE.match(value) else ""
+
+
 class Authenticator:
     def __init__(self, *, signing_key: str, auth_url: str, overrides: dict[str, dict],
                  clock: Callable[[], float], timeout_s: float = 5.0,
@@ -154,6 +168,7 @@ class Authenticator:
         self.http_get = http_get or default_http_get
         self._cache: dict[str, float] = {}  # sha256(name, token) -> expiry, successes
         self._gateway: dict[str, str] = {}  # same key -> the verified gw id ("" when the reply carried none)
+        self._caller: dict[str, str] = {}  # same key -> the workspace's verified caller ID ("" when the reply carried none)
         self._denied: dict[str, float] = {}  # same key -> expiry, 401s
         self.budget = Window(AUTH_GETS_PER_MIN, clock)
         # key -> last verified; oldest first. Junk can spend the budget, never lock these out.
@@ -167,11 +182,12 @@ class Authenticator:
         if not authorization.lower().startswith("bearer "):
             return None, "unauthorized"
         token = authorization[7:].strip()
-        gateway = ""
+        gateway = caller = ""
         if token.startswith(USAGE_PREFIX):
             name, code = self._usage(token, workspace_header.strip())
             if name is not None:
                 gateway = self._gateway.get(self._key(name, token), "")
+                caller = self._caller.get(self._key(name, token), "")
         else:
             name = verify_hmac(self.signing_key, token)
             code = "" if name else "unauthorized"
@@ -181,7 +197,7 @@ class Authenticator:
         if spec.get("disabled") is True:
             return None, "workspace_disabled"
         return Workspace(name, int(spec.get("daily_cap", DEFAULT_DAILY_CAP)),
-                         str(spec.get("timezone") or DEFAULT_TZ), gateway), ""
+                         str(spec.get("timezone") or DEFAULT_TZ), gateway, caller), ""
 
     @staticmethod
     def _key(name: str, token: str) -> str:
@@ -225,8 +241,10 @@ class Authenticator:
             if len(self._cache) > 10000:  # bound memory: drop expired entries
                 self._cache = {k: v for k, v in self._cache.items() if v > now}
                 self._gateway = {k: g for k, g in self._gateway.items() if k in self._cache}
+                self._caller = {k: c for k, c in self._caller.items() if k in self._cache}
             self._cache[key] = now + CACHE_TTL_S
             self._gateway[key] = gateway_of(body)
+            self._caller[key] = caller_of(body)
             self._remember(key, now)
             return name, ""
         if status in (401, 404):  # 404: the account service has no usage record for this workspace
