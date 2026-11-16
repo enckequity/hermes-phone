@@ -544,6 +544,22 @@ def test_person_answered_mid_response_opens_only_after_it_is_done(sb):
     assert "Sure, one second." not in json.dumps(sb.store.transcript(iid))
 
 
+def test_lost_opening_is_sent_again(sb):
+    iid, _ = sb.dial("c1")
+    sb.event(iid, "call.answered")
+    sb.event(iid, "call.machine.premium.detection.ended", result="machine")
+    with sb.client.websocket_connect(f"/v1/media/{iid}?token={sb.stream_token()}") as ws:
+        _listening_stream(sb, ws, iid)
+        sb.rt.push(_fn("person_answered", "p1"))
+        wait_for(lambda: sb.rt.of("response.create"))
+        sb.clock.advance(sb.settings.closing_max_s + 1)  # no response.created: it was rejected
+        wait_for(lambda: len(sb.rt.of("response.create")) == 2)
+        assert v1.disclosure("Acme Plumbing") in sb.rt.of("response.create")[1]["response"][
+            "instructions"]
+        ws.send_text(json.dumps({"event": "stop", "stream_id": "st-1"}))
+    assert "opening_retry" in [e["kind"] for e in sb.store.events(iid)]
+
+
 def test_split_card_number_is_refused():
     from hermes_phone.bridge.session import check_keys
 

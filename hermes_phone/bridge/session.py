@@ -117,6 +117,7 @@ class CallSession:
         # After listening, only the forced opening's audio plays until it finished, and it starts
         # only once any response still running (the person_answered tool call) is done.
         self._gate = listening
+        self._opening_retries = 0
         self._open_when_done = False
         self._open_wait_since = 0.0
 
@@ -620,7 +621,14 @@ class CallSession:
             elapsed = now - self.started_at
             if (self._opening_sent and not self._opening_done
                     and now - self._opening_sent_at >= self.settings.closing_max_s):
-                await self._opening_finished()  # response.done never arrived: do not stay deaf
+                if self._gate and not self._opening_resp and self._opening_retries < 2:
+                    self._opening_retries += 1  # the opening was never created (rejected): again
+                    self.store.add_event(self.call_id, "opening_retry", {})
+                    self._opening_sent = False
+                    await self._send_opening()
+                else:
+                    self._gate = False  # response.done never arrived: do not stay mute or deaf
+                    await self._opening_finished()
             if self._open_when_done and now - self._open_wait_since >= self.settings.end_grace_s:
                 self._open_when_done = False  # the cancelled response never reported done
                 await self._send_opening()
