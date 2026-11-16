@@ -16,6 +16,8 @@ import logging
 import math
 import re
 import secrets
+import urllib.error
+import urllib.request
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
@@ -43,6 +45,7 @@ _URL_RE = re.compile(r"(?i)\b(?:[a-z][a-z0-9+.-]*://\S*|www\.\S*|[\w-]+(?:\.[\w-
 _CTRL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2066-\u2069]")
 _NAME_DROP_RE = re.compile(r"[^A-Za-z0-9 &'.,-]")  # spoken and prompted names: allowlist only
 CALL_OK_STATES = frozenset({states.DIALING, states.RINGING, states.IN_PROGRESS})
+ALLOWANCE_FLOOR_S = 30  # less than this much monthly allowance left is no call
 DURATION_MARGIN_S = 60  # carrier-side time limit = our cap + this, as a backstop only
 PAGE = 500
 CLIENT_PER_MIN = 60  # per client IP, before auth
@@ -73,6 +76,8 @@ ERRORS: dict[str, tuple[int, str]] = {
     "quiet_hours": (422, "It is outside calling hours (08:00 to 21:00) for the callee."),
     "active_call": (422, "Another call is already active for this workspace."),
     "daily_cap": (422, "The daily call limit for this workspace is reached."),
+    "month_cap": (422, "This workspace has used this month's call time."),
+    "allowance_unavailable": (503, "Call time for this workspace could not be checked right now."),
     "redial_too_soon": (422, "This number was just called. Automatic redial is not allowed."),
     "dial_failed": (502, "The call could not be placed."),
 }
@@ -339,6 +344,23 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
             if code:
                 return error(code)
             iid, secret, max_d = _create(t, call_id, aid, e164, body, now)
+        if settings.room_url:
+            # One monthly allowance per workspace, shared with its inbound calls. The key is the gw id the auth service returned (a
+            # workspace cannot name another's); no answer, no gw id or no time left means no call. Fail closed.
+            # A usage-token workspace (t-<10 hex>) is keyed by its gw id and has none until the auth service returns one; an
+            # operator-minted token workspace is keyed by its name.
+            key = t.gateway or ("" if auth.USAGE_WORKSPACE_RE.match(t.name) else t.name)
+            granted = None
+            if key:
+                out = await in_carrier_pool(room_call, {"action": "admit", "workspace": key, "call_id": iid})
+                granted = out.get("seconds") if isinstance(out, dict) and isinstance(out.get("seconds"), int) else None
+            code = "allowance_unavailable" if granted is None else ("month_cap" if granted < ALLOWANCE_FLOOR_S else "")
+            if code:
+                store.set_result_once(iid, {"outcome": "failed", "reason": code, "summary": ERRORS[code][1]}, "failed")
+                if states.can_transition(store.get_call(iid)["state"], states.FAILED):
+                    states.transition(store, iid, states.FAILED, reason=code, outcome="failed")
+                return error(code)
+            max_d = min(max_d, granted)
         hook = f"{settings.public_base_url}/v1/telnyx/calls/{iid}/{secret}"
         req = telnyx_io.dial_body(connection_id=settings.telnyx_connection_id, to=e164,
                                   from_=settings.caller_number, webhook_url=hook,
@@ -350,6 +372,10 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
             log.warning("dial failed: %s", exc)
             store.set_result_once(iid, {"outcome": "failed", "reason": "dial_failed",
                                         "summary": ERRORS["dial_failed"][1]}, "failed")
+            if settings.room_url and isinstance(exc, telnyx_io.TelnyxError):
+                # The carrier answered with an error, so nothing was dialed: give the reserved time back. A timeout may still have
+                # placed the call, so that stays charged at the grant until it is reported.
+                await in_carrier_pool(report_close, iid, t.name, 0)
             if states.can_transition(store.get_call(iid)["state"], states.FAILED):  # not aborted
                 states.transition(store, iid, states.FAILED, reason="dial_failed",
                                   outcome="failed")
@@ -359,6 +385,25 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
             await carrier(ccid, "hangup")
         return JSONResponse({"call_id": call_id, "state": states.DIALING,
                              "bridge_call_id": iid}, status_code=201)
+
+    background: set[Any] = set()  # keeps allowance reports alive until they finish
+
+    def room_call(body: dict) -> dict | None:
+        """POST to the allowance service (loopback, bearer = member_pin_key); the parsed reply, or None when it could not answer."""
+        req = urllib.request.Request(settings.room_url, data=json.dumps(body).encode(), method="POST",
+                                     headers={"Authorization": f"Bearer {settings.room_key}",
+                                              "Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=settings.room_timeout_s) as resp:  # noqa: S310
+                out = json.loads(resp.read(4096).decode("utf-8", "replace"))
+            return out if isinstance(out, dict) else None
+        except Exception:  # noqa: BLE001 - any failure to ask or parse means no answer
+            return None
+
+    def report_close(call_id: str, workspace: str, seconds: int) -> None:
+        if settings.room_url:
+            if room_call({"action": "close", "call_id": call_id, "seconds": max(0, seconds)}) is None:
+                log.warning("allowance close for %s not delivered; it stays charged at what was granted", workspace)
 
     def _limits(t: auth.Workspace, number: Any, now: float) -> tuple[str, str]:
         e164, _ = safety.validate_number(number)
@@ -548,6 +593,10 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
             fresh = ledger.by_internal(iid) or row
             answered = fresh.get("answered_at") is not None
             secs = int(round(now - fresh["answered_at"])) if answered else 0
+            if settings.room_url:  # meter this call against the workspace's allowance (never blocks the event loop)
+                loop_task = asyncio.ensure_future(in_carrier_pool(report_close, iid, str(fresh.get("workspace")), secs))
+                background.add(loop_task)
+                loop_task.add_done_callback(background.discard)
             apply_status(store, iid, {
                 "CallStatus": telnyx_io.hangup_status(str(p.get("hangup_cause") or ""), answered),
                 "CallSid": ccid, "CallDuration": str(secs)})

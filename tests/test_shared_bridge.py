@@ -841,3 +841,100 @@ def test_sweep_skips_calls_driven_by_this_process(sb):
     assert sb.app.state.reap() == 0
     del sb.app.state.sessions[iid]
     assert sb.app.state.reap() == 1
+
+
+# ---- shared monthly allowance (loopback service, same allowance as inbound calls) ---------------
+class Room:
+    """Stands in for the allowance service: scripted admit answers, records every request."""
+
+    def __init__(self, seconds=600, fail=False) -> None:
+        self.seconds, self.fail, self.sent = seconds, fail, []
+
+    def __call__(self, req, timeout=0):
+        import io
+        import urllib.error
+        body = json.loads(req.data.decode())
+        self.sent.append((body, req.headers.get("Authorization")))
+        if self.fail:
+            raise urllib.error.URLError("down")
+
+        class R(io.BytesIO):
+            def __enter__(s):
+                return s
+
+            def __exit__(s, *a):
+                return False
+        return R(json.dumps({"seconds": self.seconds} if body["action"] == "admit" else {"ok": True}).encode())
+
+
+def with_room(store, clock, monkeypatch, room):
+    monkeypatch.setattr(v1.urllib.request, "urlopen", room)
+    return Shared(store, clock, room_url="http://127.0.0.1:8788/_internal/member-outbound", room_key="k-room")
+
+
+def test_allowance_refuses_a_spent_month_without_dialing(store, clock, monkeypatch):
+    room = Room(seconds=0)
+    sb = with_room(store, clock, monkeypatch, room)
+    r = sb.put("c1")
+    assert (r.status_code, r.json()["error"]["code"]) == (422, "month_cap")
+    assert not [p for p, _ in sb.tx.posts if p == "/calls"]
+    assert room.sent[0][0]["action"] == "admit" and room.sent[0][1] == "Bearer k-room"
+
+
+def test_allowance_caps_the_call_length_and_meters_it_at_hangup(store, clock, monkeypatch):
+    room = Room(seconds=120)
+    sb = with_room(store, clock, monkeypatch, room)
+    iid, _ = sb.dial("c1")
+    dial = [b for p, b in sb.tx.posts if p == "/calls"][0]
+    assert dial["time_limit_secs"] == 120 + v1.DURATION_MARGIN_S  # the carrier hard-stops at the allowance
+    assert room.sent[0][0] == {"action": "admit", "workspace": "wa", "call_id": iid}
+    sb.end(iid)
+    wait_for(lambda: any(b["action"] == "close" for b, _ in room.sent))
+    closed = [b for b, _ in room.sent if b["action"] == "close"][0]
+    assert closed["call_id"] == iid and closed["seconds"] == 0  # never answered: nothing used
+
+
+def test_allowance_fails_closed_when_the_service_cannot_answer(store, clock, monkeypatch):
+    sb = with_room(store, clock, monkeypatch, Room(fail=True))
+    r = sb.put("c1")
+    assert (r.status_code, r.json()["error"]["code"]) == (503, "allowance_unavailable")
+    assert not [p for p, _ in sb.tx.posts if p == "/calls"]
+
+
+def test_a_usage_workspace_without_a_gw_id_is_refused_and_one_with_it_uses_that_id(store, clock, monkeypatch):
+    room = Room(seconds=300)
+    sb = with_room(store, clock, monkeypatch, room)
+    answers = {"body": '{"front_door_instance": "gw-0123456789ab"}'}
+    name, token = "t-0123456789", "ts_usg_" + "a" * 64
+    authn = auth.Authenticator(signing_key=KEY, auth_url="http://auth.test", overrides={}, clock=clock,
+                               http_get=lambda url, h, t: (200, answers["body"]))
+    ws, code = authn.check(f"Bearer {token}", name)
+    assert code == "" and ws.gateway == "gw-0123456789ab" and ws.name == name
+    answers["body"] = "{}"
+    ws2, _ = auth.Authenticator(signing_key=KEY, auth_url="http://auth.test", overrides={}, clock=clock,
+                                http_get=lambda url, h, t: (200, answers["body"])).check(f"Bearer {token}", name)
+    assert ws2.gateway == ""
+    assert auth.gateway_of('{"front_door_instance": "gw-ZZ"}') == "" and auth.gateway_of("nope") == ""
+
+
+def test_allowance_floor_and_refund_on_a_carrier_error(store, clock, monkeypatch):
+    for seconds, code in ((29, 422), (30, 201)):
+        room = Room(seconds=seconds)
+        sb = with_room(store, clock, monkeypatch, room)
+        assert sb.put(f"f{seconds}", aid=f"ap_{seconds:032x}").status_code == code
+        clock.advance(120)  # past the same-number redial gap
+    room = Room(seconds=300)
+    sb = with_room(store, clock, monkeypatch, room)
+    sb.tx.fail_dial = True
+    clock.advance(120)
+    assert sb.put("d1", aid=f"ap_{999:032x}").status_code != 201
+    wait_for(lambda: any(b["action"] == "close" for b, _ in room.sent))
+    assert [b for b, _ in room.sent if b["action"] == "close"][0]["seconds"] == 0  # nothing was dialed: the time is returned
+
+
+def test_room_url_must_be_loopback_http():
+    from hermes_phone.bridge.settings import _room_url
+    assert _room_url(None) == "" and _room_url("http://127.0.0.1:8788/_internal/member-outbound").startswith("http://127.0.0.1")
+    for bad in ("https://example.com/x", "http://evil.test/x", "http://127.0.0.1.evil.test/x", "ftp://127.0.0.1/x"):
+        with pytest.raises(ValueError):
+            _room_url(bad)

@@ -3,6 +3,7 @@ environment; the shared bridge (``from_shared_env``) reads them from credential 
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -20,7 +21,8 @@ SHARED_DB_PATH = "/data/phone-bridge.db"
 SHARED_PORT = 8790
 # Shared bridge secrets: one file each under $CREDENTIALS_DIRECTORY, never plain env.
 CRED_FILES = {"openai_api_key": "openai_api_key", "telnyx_api_key": "telnyx_api_key",
-              "telnyx_public_key": "telnyx_public_key", "signing_key": "bridge_signing_key"}
+              "telnyx_public_key": "telnyx_public_key", "signing_key": "bridge_signing_key",
+              "room_key": "member_pin_key"}
 
 
 def _read_creds(directory: str) -> dict[str, str]:
@@ -32,6 +34,17 @@ def _read_creds(directory: str) -> dict[str, str]:
         except OSError:
             out[attr] = ""
     return out
+
+
+def _room_url(raw: str | None) -> str:
+    """The allowance service must be on this host (http, loopback): the bearer never leaves it, and a bad value turns the allowance
+    path off loudly via an empty string only when unset; anything else raises so a typo cannot silently disable the cap."""
+    raw = (raw or "").strip()
+    if not raw:
+        return ""
+    if not re.fullmatch(r"http://(127\.0\.0\.1|localhost|\[::1\])(:\d{2,5})?/[A-Za-z0-9_./-]*", raw):
+        raise ValueError("HERMES_PHONE_BRIDGE_ROOM_URL must be an http loopback URL")
+    return raw
 
 
 def _keep_days(raw: str | None) -> int:
@@ -82,6 +95,9 @@ class BridgeSettings:
     auth_timeout_s: float = 5.0
     trust_proxy: bool = False  # client IP from the first X-Forwarded-For entry (the gate's)
     transcript_retention_days: int = 30
+    room_url: str = ""  # HERMES_PHONE_BRIDGE_ROOM_URL: loopback allowance service (admit/close); unset = no monthly allowance
+    room_key: str = ""  # bearer for it, from the member_pin_key credential file
+    room_timeout_s: float = 4.0
     telnyx_api_key: str = ""
     telnyx_connection_id: str = ""
     telnyx_public_key: str = ""  # base64 Ed25519 key that signs webhooks
@@ -131,6 +147,8 @@ class BridgeSettings:
             signing_key=creds["signing_key"],
             auth_url=(env.get("HERMES_PHONE_BRIDGE_AUTH_URL") or "").strip(),
             overrides_raw=env.get("HERMES_PHONE_BRIDGE_OVERRIDES") or "",
+            room_url=_room_url(env.get("HERMES_PHONE_BRIDGE_ROOM_URL")),
+            room_key=creds["room_key"],
             inbound_enabled=(env.get("HERMES_PHONE_BRIDGE_INBOUND") or "").strip() == "1",
             telnyx_connection_id=env.get("TELNYX_CONNECTION_ID") or "",
             caller_number=env.get("HERMES_PHONE_CALLER_NUMBER") or "",

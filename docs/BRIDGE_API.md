@@ -221,6 +221,7 @@ older than their retention.
 | `TELNYX_CONNECTION_ID`, `HERMES_PHONE_CALLER_NUMBER` | Outbound connection and caller id. Required. |
 | `HERMES_PHONE_BRIDGE_AUTH_URL` | Usage-token check URL. Unset turns the usage-token path off. |
 | `HERMES_PHONE_BRIDGE_OVERRIDES` | Optional JSON object, or a path to one: `{"<workspace>": {"daily_cap": 10, "timezone": "America/New_York", "disabled": true}}`. Defaults are 10 calls a day and America/New_York. A bad file refuses new calls. |
+| `HERMES_PHONE_BRIDGE_ROOM_URL` | Optional loopback allowance service (TeamShift's voice service, `/_internal/member-outbound`). Set, every dial first asks `admit` for the workspace's gw id (returned by the auth service as `front_door_instance`; an operator-minted token workspace uses its name) and is capped at the seconds granted; 0 answers `month_cap`, no answer or no gw id answers `allowance_unavailable` (fail closed). Each call is metered with `close` at hangup. The bearer is the `member_pin_key` credential file. |
 | `HERMES_PHONE_ALLOW_ALL` | Off by default, so only allowlisted test numbers can be dialed. Production sets it to `1`. |
 | `HERMES_PHONE_BRIDGE_INBOUND` | `1` mounts the inbound callback stub (`POST /v1/telnyx/inbound`). Off by default; otherwise the bridge handles only webhooks for calls it placed. |
 | `HERMES_PHONE_BRIDGE_TRUST_PROXY` | On by default: the client address for rate limits is the first `X-Forwarded-For` entry, which the gate overwrites with one real address. The bridge listens on loopback only. `0` uses the socket address. |

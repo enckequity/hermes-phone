@@ -48,6 +48,7 @@ class Workspace:
     name: str
     daily_cap: int = DEFAULT_DAILY_CAP
     tz: str = DEFAULT_TZ
+    gateway: str = ""  # front-door instance (gw-...) from the auth service's reply: the key of the shared call allowance
 
 
 class Window:
@@ -115,22 +116,36 @@ def load_overrides(raw: str) -> dict[str, dict]:
     return data
 
 
-def default_http_get(url: str, headers: dict[str, str], timeout_s: float) -> int:
-    """Status code of a GET; 0 when there was no HTTP answer (timeout, connection error)."""
+def default_http_get(url: str, headers: dict[str, str], timeout_s: float) -> tuple[int, str]:
+    """``(status, body)`` of a GET; ``(0, "")`` when there was no HTTP answer (timeout, connection error). The body is
+    read only for a 200 and capped at 64 KB."""
     req = urllib.request.Request(url, headers=headers, method="GET")
     try:
         with urllib.request.urlopen(req, timeout=timeout_s) as resp:  # noqa: S310
-            return int(resp.status)
+            body = resp.read(65536).decode("utf-8", "replace") if int(resp.status) == 200 else ""
+            return int(resp.status), body
     except urllib.error.HTTPError as exc:
-        return int(exc.code)
+        return int(exc.code), ""
     except (urllib.error.URLError, OSError, ValueError):
-        return 0
+        return 0, ""
+
+
+GATEWAY_RE = re.compile(r"^gw-[a-f0-9]{12}$")
+
+
+def gateway_of(body: str) -> str:
+    """The ``front_door_instance`` of the auth service's usage reply, or "" when absent or malformed."""
+    try:
+        value = json.loads(body).get("front_door_instance")
+    except (ValueError, AttributeError):
+        return ""
+    return value if isinstance(value, str) and GATEWAY_RE.match(value) else ""
 
 
 class Authenticator:
     def __init__(self, *, signing_key: str, auth_url: str, overrides: dict[str, dict],
                  clock: Callable[[], float], timeout_s: float = 5.0,
-                 http_get: Callable[[str, dict[str, str], float], int] | None = None) -> None:
+                 http_get: Callable[[str, dict[str, str], float], int | tuple[int, str]] | None = None) -> None:
         self.signing_key = signing_key
         self.auth_url = auth_url.strip()
         self.overrides = overrides
@@ -138,6 +153,7 @@ class Authenticator:
         self.timeout_s = timeout_s
         self.http_get = http_get or default_http_get
         self._cache: dict[str, float] = {}  # sha256(name, token) -> expiry, successes
+        self._gateway: dict[str, str] = {}  # same key -> the verified gw id ("" when the reply carried none)
         self._denied: dict[str, float] = {}  # same key -> expiry, 401s
         self.budget = Window(AUTH_GETS_PER_MIN, clock)
         # key -> last verified; oldest first. Junk can spend the budget, never lock these out.
@@ -151,8 +167,11 @@ class Authenticator:
         if not authorization.lower().startswith("bearer "):
             return None, "unauthorized"
         token = authorization[7:].strip()
+        gateway = ""
         if token.startswith(USAGE_PREFIX):
             name, code = self._usage(token, workspace_header.strip())
+            if name is not None:
+                gateway = self._gateway.get(self._key(name, token), "")
         else:
             name = verify_hmac(self.signing_key, token)
             code = "" if name else "unauthorized"
@@ -162,7 +181,7 @@ class Authenticator:
         if spec.get("disabled") is True:
             return None, "workspace_disabled"
         return Workspace(name, int(spec.get("daily_cap", DEFAULT_DAILY_CAP)),
-                         str(spec.get("timezone") or DEFAULT_TZ)), ""
+                         str(spec.get("timezone") or DEFAULT_TZ), gateway), ""
 
     @staticmethod
     def _key(name: str, token: str) -> str:
@@ -198,13 +217,16 @@ class Authenticator:
             return None, "unauthorized"
         if not self._is_known(key, now) and not self.budget.hit("auth"):
             return None, "rate_limited"
-        status = self.http_get(self.auth_url, {"Authorization": f"Bearer {token}",
+        answer = self.http_get(self.auth_url, {"Authorization": f"Bearer {token}",
                                                "x-teamshift-workspace": name,
                                                "Accept": "application/json"}, self.timeout_s)
+        status, body = answer if isinstance(answer, tuple) else (answer, "")
         if status == 200:
             if len(self._cache) > 10000:  # bound memory: drop expired entries
                 self._cache = {k: v for k, v in self._cache.items() if v > now}
+                self._gateway = {k: g for k, g in self._gateway.items() if k in self._cache}
             self._cache[key] = now + CACHE_TTL_S
+            self._gateway[key] = gateway_of(body)
             self._remember(key, now)
             return name, ""
         if status in (401, 404):  # 404: the account service has no usage record for this workspace
