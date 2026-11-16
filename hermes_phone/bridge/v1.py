@@ -29,7 +29,7 @@ from fastapi.responses import JSONResponse, Response
 from .. import brief as briefmod
 from .. import consent, safety, states
 from ..store import Store
-from . import auth, telnyx_io
+from . import auth, business, telnyx_io
 from . import realtime as rt
 from .session import CallSession
 from .settings import BridgeSettings
@@ -81,6 +81,7 @@ ERRORS: dict[str, tuple[int, str]] = {
     "allowance_unavailable": (503, "Call time for this workspace could not be checked right now."),
     "redial_too_soon": (422, "This number was just called. Automatic redial is not allowed."),
     "dial_failed": (502, "The call could not be placed."),
+    "hangup_unavailable": (422, "This call cannot be ended early. It ends on its own within its time limit."),
 }
 
 LEDGER_SQL = """
@@ -97,13 +98,16 @@ CREATE TABLE IF NOT EXISTS bridge_calls (
   ended_at REAL,
   stream_requested_at REAL,
   disclosure_requested_at REAL,
+  handoff_at REAL,
+  result_at REAL,
   UNIQUE(workspace, call_id),
   UNIQUE(workspace, approval_id)
 );
 CREATE INDEX IF NOT EXISTS idx_bridge_calls_ws ON bridge_calls(workspace, created_at);
 """
 _LEDGER_COLUMNS = {"answered_at", "media_started_at", "ended_at", "stream_requested_at",
-                   "disclosure_requested_at"}
+                   "disclosure_requested_at", "handoff_at", "result_at"}
+_ADDED_COLUMNS = ("handoff_at", "result_at")  # business-call handoff (teamshift#2981): added to older ledgers
 
 
 def error(code: str) -> JSONResponse:
@@ -148,6 +152,10 @@ class Ledger:
         self.store = store
         with store._lock:
             store.conn.executescript(LEDGER_SQL)
+            have = {r[1] for r in store.conn.execute("PRAGMA table_info(bridge_calls)")}
+            for col in _ADDED_COLUMNS:
+                if col not in have:
+                    store.conn.execute(f"ALTER TABLE bridge_calls ADD COLUMN {col} REAL")
             store.conn.commit()
 
     def by_call(self, workspace: str, call_id: str) -> dict | None:
@@ -350,6 +358,8 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
             if code:
                 return error(code)
             iid, secret, max_d = _create(t, call_id, aid, e164, body, now)
+        if settings.business_call_url:
+            return await hand_off(t, request, call_id, iid, secret, e164, max_d)
         if settings.room_url:
             # One monthly allowance per workspace, shared with its inbound calls. The key is the gw id the auth service returned (a
             # workspace cannot name another's); no answer, no gw id or no time left means no call. Fail closed.
@@ -408,6 +418,85 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
             await carrier(ccid, "hangup")
         return JSONResponse({"call_id": call_id, "state": states.DIALING,
                              "bridge_call_id": iid}, status_code=201)
+
+    def fail_call(iid: str, code: str) -> None:
+        store.set_result_once(iid, {"outcome": "failed", "reason": code, "summary": ERRORS[code][1]}, "failed")
+        if states.can_transition(store.get_call(iid)["state"], states.FAILED):  # not aborted, not already settled
+            states.transition(store, iid, states.FAILED, reason=code, outcome="failed")
+
+    async def hand_off(t: auth.Workspace, request: Request, call_id: str, iid: str, secret: str, e164: str,
+                       max_d: int) -> Response:
+        """Place the call on linq-voice's GPT-Live stack (teamshift#2981). linq-voice meters the allowance (out_<iid>) and
+        posts exactly one result to the URL below; the request is never retried."""
+        key = t.gateway or ("" if auth.USAGE_WORKSPACE_RE.match(t.name) else t.name)  # same key as the allowance
+        if not key:
+            fail_call(iid, "allowance_unavailable")
+            return error("allowance_unavailable")
+        call = store.get_call(iid)
+        payload = briefmod.voice_payload(call, store.consents(iid))
+        # The workspace's own number only with its own usage token: linq-voice checks both against the portal (#2992).
+        token = (request.headers.get("authorization") or "").partition(" ")[2].strip()
+        caller_auth = ({"name": t.name, "token": token} if t.caller and auth.USAGE_TOKEN_RE.match(token)
+                       and auth.USAGE_WORKSPACE_RE.match(t.name) else None)
+        req = business.request(iid=iid, workspace=key, number=e164, payload=payload, max_seconds=max_d,
+                               result_url=f"{settings.business_result_base}/v1/business/results/{iid}/{secret}",
+                               caller_number=t.caller if caller_auth else "", caller_auth=caller_auth)
+        ledger.stamp(iid, "handoff_at", clock())  # before the post: the result can arrive before its reply
+        status, reply = await in_carrier_pool(business.post, settings.business_call_url, settings.room_key, req,
+                                              settings.business_timeout_s)
+        if status == 0:
+            # No answer: the call may still have been placed, and it is never re-sent. It stays dialing until its result
+            # arrives or the reaper ends it after its time limit.
+            log.warning("business call %s: no reply from the voice service; waiting for its result", iid)
+            store.add_event(iid, "handoff_unconfirmed", {})
+        elif code := business.refusal(status, reply):
+            log.warning("business call %s refused (%s %s)", iid, status, str(reply.get("state") or "")[:20])
+            fail_call(iid, code)
+            return error(code)
+        store.add_event(iid, "handoff", {})
+        in_background(report_dialed, {"action": "dialed", "call_id": iid, "workspace": key, "number": e164,
+                                      "callee": str(call.get("callee_name") or "")[:200],
+                                      "about": " ".join(str(call.get("goal") or "").split())[:DIALED_ABOUT_MAX]})
+        return JSONResponse({"call_id": call_id, "state": states.DIALING, "bridge_call_id": iid}, status_code=201)
+
+    @app.post("/v1/business/results/{iid}/{secret}")
+    async def business_result(iid: str, secret: str, request: Request) -> Response:
+        """linq-voice's one result for a handed-off call. No credential: the per-call secret in the path is the proof.
+        A repeated call_id (re-sent after a restart) is acknowledged and ignored."""
+        row = ledger.by_internal(iid) if _ID_RE.match(iid) else None
+        if (row is None or not row.get("handoff_at")
+                or not hmac.compare_digest(_sha(secret), row["hook_secret_hash"])):
+            return error("not_found")
+        body = await _json(request)
+        res = business.parse_result(body)
+        if res is None or (isinstance(body, dict) and body.get("call_id") not in (None, iid)):
+            return error("bad_request")
+        now = clock()
+        if not ledger.stamp(iid, "result_at", now):
+            return JSONResponse({"ok": True, "duplicate": True})
+        kind = business.outcome_of(res)
+        result: dict[str, Any] = {"outcome": kind, "summary": res["outcome"], "reason": f"business_{res['state']}",
+                                  "next_steps": res["next_steps"][:1000], "duration_s": res["seconds"]}
+        if res["agreed"].strip():
+            result["agreed"] = {"notes": res["agreed"]}
+        store.set_result_once(iid, result, kind)
+        if res["seconds"] and res["state"] in ("completed", "machine"):
+            ledger.stamp(iid, "answered_at", now - res["seconds"])
+            ledger.stamp(iid, "media_started_at", now - res["seconds"])
+        store.update_call(iid, duration_s=res["seconds"])
+        if row["store_transcripts"] and settings.store_transcripts:
+            for role, text in business.transcript_lines(res["transcript_tail"]):
+                store.add_transcript_line(iid, role, text)
+        for step in business.path_of(res):
+            cur = store.get_call(iid)
+            if states.can_transition(cur["state"], step):
+                fields: dict[str, Any] = {"reason": f"business_{res['state']}"} if step in states.TERMINAL else {}
+                if step in states.TERMINAL and not cur.get("outcome"):
+                    fields["outcome"] = kind
+                states.transition(store, iid, step, **fields)
+        ledger.stamp(iid, "ended_at", now)
+        store.add_event(iid, "business_result", {"state": res["state"]})
+        return JSONResponse({"ok": True})
 
     background: set[Any] = set()  # keeps allowance reports alive until they finish
 
@@ -566,6 +655,8 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
         call = store.get_call(iid)
         if call is None or call["state"] in states.TERMINAL:
             return error("ended")
+        if row.get("handoff_at"):  # driven by linq-voice, which has no way to end it early
+            return error("hangup_unavailable")
         store.request_hangup(iid)
         if iid not in sessions:  # no voice session ticking yet: end it here
             store.set_result_once(iid, {"outcome": "needs_followup", "reason": "user_hangup",
@@ -792,7 +883,7 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
         now = clock()
         live = sorted(states.ACTIVE)
         rows = store._all(
-            "SELECT b.internal_id, b.created_at FROM bridge_calls b JOIN calls c ON "
+            "SELECT b.internal_id, b.created_at, b.handoff_at FROM bridge_calls b JOIN calls c ON "
             f"c.id=b.internal_id WHERE c.state IN ({','.join('?' * len(live))})", tuple(live))
         n = 0
         for r in rows:
@@ -801,9 +892,9 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
                 continue  # driven by this process: its own ticker enforces the cap
             call = store.get_call(iid)
             limit = int(call["brief"]["limits"]["max_duration_s"])
-            if not restart and now < (r["created_at"] + limit + telnyx_io.DIAL_TIMEOUT_S
-                                      + REAP_MARGIN_S):
-                continue
+            stale = now >= r["created_at"] + limit + telnyx_io.DIAL_TIMEOUT_S + REAP_MARGIN_S
+            if (not restart or r["handoff_at"]) and not stale:
+                continue  # a handed-off call is driven by linq-voice, across our restarts too
             reason = "bridge_restart" if restart else "stale_call"
             if call.get("provider_sid"):
                 try:
