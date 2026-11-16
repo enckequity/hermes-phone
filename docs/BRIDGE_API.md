@@ -190,8 +190,8 @@ a sensitive value the user did not consent to for this call, the plugin sends
 Body `{}`. The user's kill switch (`/phone hangup`). It is idempotent: `200` when the call is
 ending or has ended, `409` when it was already over (the plugin treats this as success too). The
 terminal state then comes back through `updates`. A business call handed to the voice service
-(below) answers `422 hangup_unavailable`: it cannot be ended early and stops on its own within its
-time limit (five minutes at most).
+(below) is cancelled there: `200` once it is ending (its result then says `cancelled`), `409` when
+it had already ended, and `503 hangup_unavailable` when the voice service could not be asked.
 
 ## Running the shared bridge
 
@@ -243,7 +243,8 @@ optional inbound stub.
 
 With `HERMES_PHONE_BUSINESS_CALL_URL` set, `PUT /v1/calls/{call_id}` still checks the approval,
 quiet hours, the allowlist, the active call and the daily cap, then sends the call to the voice
-service once (never retried) instead of dialing it:
+service once instead of dialing it. It is never retried, and it is sent in the background: the
+PUT answers `201` at once, and a refusal arrives as the call's `failed` result with its `reason`:
 `{call_id: <internal id>, workspace: <gw id>, number, brief: {goal, facts, disclosure,
 max_seconds <= 300, rules}, result_url}`. `facts` are the consent-filtered facts as `key: value`
 lines, `disclosure` is the bridge's own line. When the auth service reports a verified caller
@@ -256,13 +257,15 @@ The voice service meters the allowance itself (`out_<internal id>`), so the brid
 `admit` or `close` these calls. Its replies map to: `202` dialing; `429 allowance` →
 `month_cap`; `429 busy` → `rate_limited`; `400`, `409` or `200 failed` → `dial_failed`. With no
 reply at all the call may still have been placed, so it stays `dialing` and waits for its
-result (the reaper ends it after its cap plus ring time).
+result (the reaper ends it 150 s after its cap of at most 300 s). A refused connection placed
+nothing and is `dial_failed`.
 
 The result comes once to `result_url` (the call's own secret is its only proof):
-`{call_id, state: completed|no_answer|machine|failed, outcome, agreed, next_steps, seconds,
-transcript_tail}`. `completed` becomes `success` when something was agreed with no open next
-step, `partial` with one, `needs_followup` when nothing was agreed; `machine` ends as
-`completed` with outcome `voicemail`. The voice service re-sends an unconfirmed result after a
+`{call_id, state: completed|no_answer|machine|failed|cancelled, outcome, agreed, next_steps, seconds,
+transcript_tail}`. `completed` becomes `success` when something was agreed and
+`needs_followup` when nothing was; `machine` ends as
+`completed` with outcome `voicemail`; `cancelled` (the user hung up) ends as `aborted` with
+outcome `needs_followup`. The voice service re-sends an unconfirmed result after a
 restart, so a repeated result for the same call is answered `200 {"ok": true, "duplicate":
 true}` and changes nothing. A bridge restart does not end these calls: the voice service is
 still driving them.

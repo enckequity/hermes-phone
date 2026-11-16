@@ -81,7 +81,7 @@ ERRORS: dict[str, tuple[int, str]] = {
     "allowance_unavailable": (503, "Call time for this workspace could not be checked right now."),
     "redial_too_soon": (422, "This number was just called. Automatic redial is not allowed."),
     "dial_failed": (502, "The call could not be placed."),
-    "hangup_unavailable": (422, "This call cannot be ended early. It ends on its own within its time limit."),
+    "hangup_unavailable": (503, "The call could not be ended right now. Try again shortly."),
 }
 
 LEDGER_SQL = """
@@ -442,22 +442,31 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
                                result_url=f"{settings.business_result_base}/v1/business/results/{iid}/{secret}",
                                caller_number=t.caller if caller_auth else "", caller_auth=caller_auth)
         ledger.stamp(iid, "handoff_at", clock())  # before the post: the result can arrive before its reply
-        status, reply = await in_carrier_pool(business.post, settings.business_call_url, settings.room_key, req,
-                                              settings.business_timeout_s)
+        dialed = {"action": "dialed", "call_id": iid, "workspace": key, "number": e164,
+                  "callee": str(call.get("callee_name") or "")[:200],
+                  "about": " ".join(str(call.get("goal") or "").split())[:DIALED_ABOUT_MAX]}
+        # The voice service answers only once the dial is placed (up to ~25 s), longer than the plugin waits for this PUT, so it
+        # is asked in the background; a refusal becomes this call's failed result in updates.
+        in_background(deliver, iid, req, dialed)
+        return JSONResponse({"call_id": call_id, "state": states.DIALING, "bridge_call_id": iid}, status_code=201)
+
+    def deliver(iid: str, req: dict, dialed: dict) -> None:
+        status, reply = business.post(settings.business_call_url, settings.room_key, req, settings.business_timeout_s)
         if status == 0:
             # No answer: the call may still have been placed, and it is never re-sent. It stays dialing until its result
-            # arrives or the reaper ends it after its time limit.
+            # arrives or the reaper ends it.
             log.warning("business call %s: no reply from the voice service; waiting for its result", iid)
             store.add_event(iid, "handoff_unconfirmed", {})
-        elif code := business.refusal(status, reply):
+            return
+        if code := business.refusal(status, reply):
             log.warning("business call %s refused (%s %s)", iid, status, str(reply.get("state") or "")[:20])
             fail_call(iid, code)
-            return error(code)
+            ledger.stamp(iid, "ended_at", clock())
+            return
         store.add_event(iid, "handoff", {})
-        in_background(report_dialed, {"action": "dialed", "call_id": iid, "workspace": key, "number": e164,
-                                      "callee": str(call.get("callee_name") or "")[:200],
-                                      "about": " ".join(str(call.get("goal") or "").split())[:DIALED_ABOUT_MAX]})
-        return JSONResponse({"call_id": call_id, "state": states.DIALING, "bridge_call_id": iid}, status_code=201)
+        if store.hangup_requested(iid):  # the user hung up before the voice service had the call
+            business.cancel(settings.business_call_url, settings.room_key, iid, settings.business_timeout_s)
+        report_dialed(dialed)
 
     @app.post("/v1/business/results/{iid}/{secret}")
     async def business_result(iid: str, secret: str, request: Request) -> Response:
@@ -655,7 +664,24 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
         call = store.get_call(iid)
         if call is None or call["state"] in states.TERMINAL:
             return error("ended")
-        if row.get("handoff_at"):  # driven by linq-voice, which has no way to end it early
+        if row.get("handoff_at"):  # driven by linq-voice: it ends the call and its result says cancelled
+            store.request_hangup(iid)  # a hand-off still in flight cancels as soon as it is accepted
+            status = await in_carrier_pool(business.cancel, settings.business_call_url, settings.room_key, iid,
+                                           settings.business_timeout_s)
+            if status == 200:
+                store.add_event(iid, "cancel_requested", {})
+                return JSONResponse({"ok": True})
+            if status == 409:  # already ended or settled there: its result is on the way
+                return error("ended")
+            if status == 404 and ledger.stamp(iid, "result_at", clock()):  # never placed there: no result will come
+                store.set_result_once(iid, {"outcome": "needs_followup", "reason": "user_hangup",
+                                            "summary": "The user ended the call."}, "needs_followup")
+                if states.can_transition(store.get_call(iid)["state"], states.ABORTED):
+                    states.transition(store, iid, states.ABORTED, reason="user_hangup")
+                ledger.stamp(iid, "ended_at", clock())
+                return JSONResponse({"ok": True})
+            if status == 404:
+                return error("ended")
             return error("hangup_unavailable")
         store.request_hangup(iid)
         if iid not in sessions:  # no voice session ticking yet: end it here
@@ -892,6 +918,8 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
                 continue  # driven by this process: its own ticker enforces the cap
             call = store.get_call(iid)
             limit = int(call["brief"]["limits"]["max_duration_s"])
+            if r["handoff_at"]:  # linq-voice caps at 300 s and may still ring, say goodbye and post after that
+                limit = min(limit, business.MAX_SECONDS) + business.TAIL_S - telnyx_io.DIAL_TIMEOUT_S - REAP_MARGIN_S
             stale = now >= r["created_at"] + limit + telnyx_io.DIAL_TIMEOUT_S + REAP_MARGIN_S
             if (not restart or r["handoff_at"]) and not stale:
                 continue  # a handed-off call is driven by linq-voice, across our restarts too

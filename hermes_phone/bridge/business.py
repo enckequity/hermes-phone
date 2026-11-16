@@ -22,6 +22,9 @@ from urllib.parse import urlsplit
 from .. import states
 
 MIN_SECONDS, MAX_SECONDS = 30, 300  # linq-voice refuses anything outside this
+REFUSED = -1  # post(): the connection was refused, so nothing was sent
+# After its cap linq-voice may still: wait for its request (~25 s), ring (30 s), say goodbye, hang up (15 s), post (15 s).
+TAIL_S = 150
 RESULT_HOSTS = frozenset({"127.0.0.1", "172.22.0.1"})  # linq-voice posts results only here
 GOAL_MAX, FACTS_MAX, DISCLOSURE_MAX, RULES_MAX = 2000, 4000, 300, 2000
 RESULT_TEXT_MAX = 2000
@@ -34,6 +37,8 @@ _PATHS: dict[str, tuple[tuple[str, ...], str]] = {
     "no_answer": ((states.NO_ANSWER,), "no_answer"),
     "machine": ((states.IN_PROGRESS, states.VOICEMAIL, states.COMPLETED), "voicemail"),
     "failed": ((states.FAILED,), "failed"),
+    # the customer hung up on the task (cancel, teamshift#3000): like a hangup before the bridge's own session ran
+    "cancelled": ((states.ABORTED,), "needs_followup"),
 }
 
 
@@ -80,6 +85,11 @@ def rules_text(user_name: str) -> str:
             "the facts. Before ending, confirm the key details back and ask for a confirmation number.")[:RULES_MAX]
 
 
+def caller_ok(number: str) -> bool:
+    """linq-voice refuses (400, failing the call) a caller_number outside US/Canada: send only +1 numbers."""
+    return bool(re.fullmatch(r"\+1[2-9][0-9]{2}[2-9][0-9]{6}", number or ""))
+
+
 def request(*, iid: str, workspace: str, number: str, payload: dict, max_seconds: int, result_url: str,
             caller_number: str = "", caller_auth: dict | None = None) -> dict:
     """The /_internal/business-call body. ``caller_number`` goes only together with ``caller_auth``."""
@@ -93,7 +103,7 @@ def request(*, iid: str, workspace: str, number: str, payload: dict, max_seconds
             "rules": rules_text(str(payload.get("user_name") or "the customer")),
         },
     }
-    if caller_number and caller_auth:
+    if caller_number and caller_auth and caller_ok(caller_number):
         body["caller_number"], body["caller_auth"] = caller_number, caller_auth
     return body
 
@@ -105,15 +115,28 @@ def post(url: str, key: str, body: dict, timeout_s: float) -> tuple[int, dict]:
     try:
         with urllib.request.urlopen(req, timeout=timeout_s) as resp:  # noqa: S310 - loopback only
             status, raw = int(resp.status), resp.read(4096)
-    except urllib.error.HTTPError as exc:
-        status, raw = int(exc.code), b""
-    except (urllib.error.URLError, OSError, ValueError):
+    except urllib.error.HTTPError as exc:  # 4xx/5xx: the body still says why (429 allowance vs busy)
+        try:
+            status, raw = int(exc.code), exc.read(4096)
+        except OSError:
+            status, raw = int(exc.code), b""
+    except urllib.error.URLError as exc:
+        # Refused: nothing listened, so nothing was placed. Anything else (a timeout above all) may have placed the call.
+        return (REFUSED if isinstance(exc.reason, ConnectionRefusedError) else 0), {}
+    except ConnectionRefusedError:
+        return REFUSED, {}
+    except (OSError, ValueError):
         return 0, {}
     try:
         reply = json.loads(raw.decode("utf-8", "replace")) if raw else {}
     except ValueError:
         reply = {}
     return status, reply if isinstance(reply, dict) else {}
+
+
+def cancel(url: str, key: str, iid: str, timeout_s: float) -> int:
+    """Ask linq-voice to end a handed-off call (teamshift#3000); its HTTP status, or 0 without an answer."""
+    return post(url, key, {"call_id": iid, "action": "cancel"}, timeout_s)[0]
 
 
 def refusal(status: int, reply: dict) -> str:
@@ -143,9 +166,8 @@ def outcome_of(res: dict) -> str:
     path_outcome = _PATHS[res["state"]][1]
     if path_outcome:
         return path_outcome
-    if res["agreed"].strip():
-        return "partial" if res["next_steps"].strip() else "success"
-    return "needs_followup"
+    # linq-voice's end_call fills next_steps even for a done deal ("arrive 10 min early"), so agreed alone means success.
+    return "success" if res["agreed"].strip() else "needs_followup"
 
 
 def path_of(res: dict) -> tuple[str, ...]:
