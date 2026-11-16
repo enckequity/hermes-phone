@@ -413,7 +413,8 @@ def test_machine_answer_listens_through_the_menu_then_discloses_to_the_person(sb
         assert sess["tool_choice"] == "required"
         assert sess["audio"]["input"]["turn_detection"]["create_response"] is True
         menu_audio = base64.b64encode(b"\x01" * 160).decode()
-        sb.rt.push({"type": "response.output_audio.delta", "item_id": "m1", "delta": menu_audio})
+        sb.rt.push({"type": "response.output_audio.delta", "response_id": "t0", "item_id": "m1",
+                    "delta": menu_audio})
         sb.rt.push({"type": "input_audio_buffer.speech_stopped"})  # menu prompt: no opening yet
         sb.rt.push(_fn("press_keys", "k1", keys="2", why="appointments"))
         wait_for(lambda: sb.tx.actions("send_dtmf"))
@@ -425,12 +426,14 @@ def test_machine_answer_listens_through_the_menu_then_discloses_to_the_person(sb
         assert not sb.rt.of("response.create")  # silent: no opening, no reply to the menu
         sb.rt.push(_fn("person_answered", "p1"))
         wait_for(lambda: sb.rt.of("response.create"))
+        sb.rt.push({"type": "response.created", "response": {"id": "o1"}})
         instr = sb.rt.of("response.create")[0]["response"]["instructions"]
         assert v1.disclosure("Acme Plumbing") in instr  # the bridge's disclosure, word for word
         talk = sb.rt.of("session.update")[1]["session"]
         assert talk["tool_choice"] == "auto" and "on_hold" in [t["name"] for t in talk["tools"]]
         out = base64.b64encode(b"\xff" * 160).decode()
-        sb.rt.push({"type": "response.output_audio.delta", "item_id": "it2", "delta": out})
+        sb.rt.push({"type": "response.output_audio.delta", "response_id": "o1", "item_id": "it2",
+                    "delta": out})
         # the first audio the line ever gets is the opening, never the dropped menu-time audio
         assert json.loads(ws.receive_text()) == {"event": "media", "media": {"payload": out}}
         ws.send_text(json.dumps({"event": "stop", "stream_id": "st-1"}))
@@ -476,16 +479,16 @@ def test_key_press_cap_and_long_numbers(sb):
         assert "error" in out["x1"] and out["x2"] == {"status": "ok"} and "error" in out["x3"]
         assert [b["digits"] for _, b in sb.tx.actions("send_dtmf")] == ["48213907#"]
         for n in range(25):
-            sb.rt.push(_fn("press_keys", f"n{n}", keys="9"))
+            sb.rt.push(_fn("press_keys", f"n{n}", keys="#"))  # no digits: only the press cap
         wait_for(lambda: "n24" in _outputs(sb))
         assert len(sb.tx.actions("send_dtmf")) == 20  # MAX_KEY_PRESSES per call
         assert "Too many" in _outputs(sb)["n24"]["error"]
         ws.send_text(json.dumps({"event": "stop", "stream_id": "st-1"}))
 
 
-def test_hold_mid_call_goes_silent_and_resumes(sb):
+def test_hold_mid_call_goes_silent_and_discloses_again(sb):
     iid, _ = sb.dial("c1")
-    answered_human(sb, iid)
+    answered_human(sb, iid)  # the carrier spoke the disclosure before the stream
     with sb.client.websocket_connect(f"/v1/media/{iid}?token={sb.stream_token()}") as ws:
         _listening_stream(sb, ws, iid)
         assert "on_hold" in [t["name"] for t in sb.rt.of("session.update")[0]["session"]["tools"]]
@@ -498,14 +501,60 @@ def test_hold_mid_call_goes_silent_and_resumes(sb):
         updates = sb.rt.of("session.update")
         assert any(u["session"].get("tool_choice") == "required" for u in updates)
         assert json.loads(ws.receive_text())["event"] == "clear"
-        sb.rt.push({"type": "response.output_audio.delta", "item_id": "x", "delta": MULAW_20MS})
+        sb.rt.push({"type": "response.output_audio.delta", "response_id": "r2", "item_id": "x",
+                    "delta": MULAW_20MS})  # talking over hold music: dropped
         sb.rt.push(_fn("person_answered", "p1"))
         wait_for(lambda: len(sb.rt.of("response.create")) == 2)
-        assert "back on the line" in sb.rt.of("response.create")[1]["response"]["instructions"]
+        # the person after the hold may be someone new: the exact disclosure again
+        assert v1.disclosure("Acme Plumbing") in sb.rt.of("response.create")[1]["response"][
+            "instructions"]
+        sb.rt.push({"type": "response.created", "response": {"id": "r3"}})
         out = base64.b64encode(b"\xfe" * 160).decode()
-        sb.rt.push({"type": "response.output_audio.delta", "item_id": "it3", "delta": out})
+        sb.rt.push({"type": "response.output_audio.delta", "response_id": "r3", "item_id": "it3",
+                    "delta": out})
         assert json.loads(ws.receive_text()) == {"event": "media", "media": {"payload": out}}
         ws.send_text(json.dumps({"event": "stop", "stream_id": "st-1"}))
+
+
+def test_person_answered_mid_response_opens_only_after_it_is_done(sb):
+    iid, _ = sb.dial("c1")
+    sb.event(iid, "call.answered")
+    sb.event(iid, "call.machine.premium.detection.ended", result="machine")
+    with sb.client.websocket_connect(f"/v1/media/{iid}?token={sb.stream_token()}") as ws:
+        _listening_stream(sb, ws, iid)
+        sb.rt.push({"type": "response.created", "response": {"id": "t1"}})
+        sb.rt.push(_fn("person_answered", "p1"))  # arrives while response t1 is still running
+        wait_for(lambda: sb.rt.of("response.cancel"))
+        assert not sb.rt.of("response.create")  # never sent into an active response
+        stray = base64.b64encode(b"\x02" * 160).decode()
+        sb.rt.push({"type": "response.output_audio.delta", "response_id": "t1", "item_id": "a",
+                    "delta": stray})  # the cancelled response's leftover audio stays muted
+        sb.rt.push({"type": "response.output_audio_transcript.done", "response_id": "t1",
+                    "transcript": "Sure, one second."})
+        sb.rt.push({"type": "response.done", "response": {"id": "t1"}})
+        wait_for(lambda: sb.rt.of("response.create"))
+        assert v1.disclosure("Acme Plumbing") in sb.rt.of("response.create")[0]["response"][
+            "instructions"]
+        sb.rt.push({"type": "response.created", "response": {"id": "o1"}})
+        out = base64.b64encode(b"\xfd" * 160).decode()
+        sb.rt.push({"type": "response.output_audio.delta", "response_id": "o1", "item_id": "b",
+                    "delta": out})
+        assert json.loads(ws.receive_text()) == {"event": "media", "media": {"payload": out}}
+        ws.send_text(json.dumps({"event": "stop", "stream_id": "st-1"}))
+    assert "Sure, one second." not in json.dumps(sb.store.transcript(iid))
+
+
+def test_split_card_number_is_refused():
+    from hermes_phone.bridge.session import check_keys
+
+    used, results = 0, []
+    for chunk in ("4111", "1111", "1111", "1111"):
+        why, free = check_keys(chunk, {"name": "Winch"}, used)
+        used += free
+        results.append(why)
+    assert results[:3] == ["", "", ""] and "No more keypad" in results[3]
+    assert check_keys("12345", {}, 0)[0] and check_keys("12345", {"acct": "12-345"}, 0) == ("", 0)
+    assert check_keys("1;2", {}, 0)[0] and check_keys("", {}, 0)[0]
 
 
 def test_machine_with_message_streams_after_greeting(sb):

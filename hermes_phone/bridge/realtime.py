@@ -275,10 +275,6 @@ DECLINED_INSTRUCTIONS = ("The ask_user result says the information will not be s
                          "tell the callee you are not able to share that, then continue with the "
                          "goal of the call.")
 
-BACK_FROM_HOLD_INSTRUCTIONS = ("A person is back on the line after a hold or transfer. If this is "
-                               "a new person, say in one sentence that you are an AI assistant "
-                               "calling for the user and what you need; otherwise carry on with "
-                               "the goal of the call.")
 WRAPUP_INSTRUCTIONS = ("The call time limit is almost reached. Politely wrap up now: summarise "
                        "what is agreed in one sentence, say goodbye, then call end_call.")
 VOICEMAIL_INSTRUCTIONS = ("You have reached an answering machine. Leave a short message with the "

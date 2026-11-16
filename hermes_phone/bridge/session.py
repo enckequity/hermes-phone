@@ -27,22 +27,26 @@ log = logging.getLogger(__name__)
 MAX_Q_LEN = 500
 MAX_KEY_PRESSES = 20  # press_keys calls per call: a menu loop must not run up the line
 FREE_KEY_DIGITS = 4  # a menu option or extension; a longer number must be one of the facts
+FREE_DIGITS_PER_CALL = 12  # free digits in total: no card number keyed a few digits at a time
 _KEYS_RE = re.compile(r"^[0-9*#wW]{1,32}$")
 
 
-def check_keys(keys: str, facts: dict) -> str:
-    """'' when the keys may be pressed, else the reason. Long numbers only come from the facts the
-    user approved for this call (the consent-filtered voice payload), never from the callee."""
+def check_keys(keys: str, facts: dict, free_used: int = 0) -> tuple[str, int]:
+    """('', free digits this press uses) when the keys may be pressed, else (reason, 0). A number
+    that is one of the facts the user approved for this call (the consent-filtered voice payload)
+    is free; anything else counts against FREE_KEY_DIGITS per press and FREE_DIGITS_PER_CALL."""
     if not isinstance(keys, str) or not _KEYS_RE.match(keys):
-        return "Use only digits 0-9, * and #, with w for a pause."
+        return "Use only digits 0-9, * and #, with w for a pause.", 0
     digits = re.sub(r"\D", "", keys)
-    if len(digits) <= FREE_KEY_DIGITS:
-        return ""
     allowed = {re.sub(r"\D", "", str(v)) for v in (facts or {}).values()
                if isinstance(v, (str, int))}
-    if digits in allowed:
-        return ""
-    return "That number is not in your facts; ask the user with ask_user instead."
+    if len(digits) > FREE_KEY_DIGITS and digits in allowed:
+        return "", 0
+    if len(digits) > FREE_KEY_DIGITS:
+        return "That number is not in your facts; ask the user with ask_user instead.", 0
+    if free_used + len(digits) > FREE_DIGITS_PER_CALL:
+        return "No more keypad entries on this call; end_call with needs_followup.", 0
+    return "", len(digits)
 
 
 
@@ -67,6 +71,7 @@ class CallSession:
         self.started_at = clock()
         self.max_duration_s = int(call["brief"]["limits"]["max_duration_s"])
         self.payload = briefmod.voice_payload(call, store.consents(self.call_id))
+        self._disclosure_line = self.payload["opening_line"]  # said again to anyone after a hold
         if disclosed:  # the carrier already played the disclosure: the model must not repeat it
             self.payload = {**self.payload, "opening_line": ""}
         # playback tracking (barge-in)
@@ -107,7 +112,13 @@ class CallSession:
         self._press_keys = press_keys
         self.listening = listening
         self._key_presses = 0
+        self._free_digits = 0
         self._dropped_audio = False
+        # After listening, only the forced opening's audio plays until it finished, and it starts
+        # only once any response still running (the person_answered tool call) is done.
+        self._gate = listening
+        self._open_when_done = False
+        self._open_wait_since = 0.0
 
     # ---- public --------------------------------------------------------------------------
     def notify_voicemail(self, answered_by: str) -> None:
@@ -202,7 +213,11 @@ class CallSession:
             self.response_active = False
             rid = str((ev.get("response") or {}).get("id") or "?")
             if self._opening_resp and rid == self._opening_resp and not self._opening_done:
+                self._gate = False  # the disclosure was spoken: normal audio from here
                 await self._opening_finished()
+            if self._open_when_done:
+                self._open_when_done = False
+                await self._send_opening()
             if self._closing_resp and rid == self._closing_resp:
                 self._closing_done = True
             if self._end_pending:
@@ -210,7 +225,8 @@ class CallSession:
         elif etype == "response.output_audio.delta":
             await self._on_audio_delta(ev)
         elif etype == "response.output_audio_transcript.done":
-            self._line("agent", ev.get("transcript", ""))
+            if not self._muted(str(ev.get("response_id") or "")):  # never record unheard lines
+                self._line("agent", ev.get("transcript", ""))
         elif etype == "conversation.item.input_audio_transcription.completed":
             self._line("callee", ev.get("transcript", ""))
         elif etype == "input_audio_buffer.speech_stopped":
@@ -258,7 +274,7 @@ class CallSession:
         item = ev.get("item_id") or ""
         if not delta or not self.stream_sid:
             return
-        if self.listening:  # never talk to a menu, a recording or hold music
+        if self._muted(str(ev.get("response_id") or "")):  # menus, hold, before the disclosure
             if not self._dropped_audio:
                 self._dropped_audio = True
                 self.store.add_event(self.call_id, "listening_audio_dropped", {})
@@ -339,14 +355,19 @@ class CallSession:
             await self._rt_send({"type": "response.create"})
 
     # ---- phone menus and hold ----------------------------------------------------------------
+    def _muted(self, response_id: str) -> bool:
+        return self.listening or (self._gate and (not self._opening_resp
+                                                  or response_id != self._opening_resp))
+
     async def _tool_press_keys(self, args: dict) -> dict:
         keys = str(args.get("keys") or "")
-        why = check_keys(keys, self.payload.get("facts") or {})
+        why, free = check_keys(keys, self.payload.get("facts") or {}, self._free_digits)
         if why:
             return {"error": why}
         if self._key_presses >= MAX_KEY_PRESSES:
             return {"error": "Too many key presses on this call; end_call with needs_followup."}
         self._key_presses += 1
+        self._free_digits += free
         assert self._press_keys is not None
         ok = await self._press_keys(keys, f"{self.call_id}-k{self._key_presses}")
         # Only the length is kept: a long number may be an account number from the facts.
@@ -378,19 +399,24 @@ class CallSession:
             self.response_active = False
         await self._tw_send({"event": "clear", "streamSid": self.stream_sid})
         await self._rt_send(rt.mode_update(keys=True, listening=True))
+        # Whoever picks up next hears the forced opening with the disclosure, word for word,
+        # even if the carrier spoke it before the hold or the opening was cut off by it.
+        self.payload = {**self.payload, "opening_line": self._disclosure_line}
+        self._opening_sent = self._opening_done = False
+        self._opening_resp = ""
+        self._gate = True
 
     async def _leave_listening(self) -> None:
         self.listening = False
         self.store.add_event(self.call_id, "person_answered", {})
         await self._rt_send(rt.mode_update(keys=True, listening=False))
-        if not self._opening_sent:  # first person on the line: the forced opening (disclosure)
-            await self._rt_send(rt.turn_detection_update(create_response=False,
-                                                         interrupt_response=False))
+        await self._rt_send(rt.turn_detection_update(create_response=False,
+                                                     interrupt_response=False))
+        if self.response_active:  # the person_answered response: end it, open when it is done
+            await self._rt_send({"type": "response.cancel"})
+            self._open_when_done, self._open_wait_since = True, self.clock()
+        else:
             await self._send_opening()
-        else:  # back from hold: carry on with the goal
-            await self._rt_send(rt.turn_detection_update(create_response=not self._hold_vad))
-            await self._rt_send({"type": "response.create", "response": {
-                "instructions": self._ctx(rt.BACK_FROM_HOLD_INSTRUCTIONS)}})
 
     # ---- ask_user: relay a question to the user while the call is on hold -------------------
     @property
@@ -595,7 +621,10 @@ class CallSession:
             if (self._opening_sent and not self._opening_done
                     and now - self._opening_sent_at >= self.settings.closing_max_s):
                 await self._opening_finished()  # response.done never arrived: do not stay deaf
-            if (not self._opening_sent and not self.listening
+            if self._open_when_done and now - self._open_wait_since >= self.settings.end_grace_s:
+                self._open_when_done = False  # the cancelled response never reported done
+                await self._send_opening()
+            if (not self._opening_sent and not self.listening and not self._open_when_done
                     and elapsed >= self.settings.opening_wait_s):
                 await self._send_opening()  # nobody said hello: speak first
             if self._end_pending and now - self._end_pending_at >= self.settings.end_grace_s:

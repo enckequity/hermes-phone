@@ -227,7 +227,6 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
     auth_slots = asyncio.Semaphore(AUTH_WORKERS)
     by_client = auth.Window(CLIENT_PER_MIN, clock)
     by_workspace = auth.Window(WORKSPACE_PER_MIN, clock)
-    listen: set[str] = set()  # answered by a menu or machine: the stream starts in listening mode
 
     def client_ip(request: Request) -> str:
         if settings.trust_proxy:
@@ -608,6 +607,13 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
                 "CallSid": ccid, "CallDuration": str(secs)})
         return JSONResponse({"ok": True})
 
+    def _listens(row: dict, call: dict) -> bool:
+        """A stream that was started without a spoken disclosure (menu or machine): listening.
+        From the ledger, so a restart or another worker gets the same answer."""
+        fresh = ledger.by_internal(row["internal_id"]) or row
+        return (fresh.get("disclosure_requested_at") is not None
+                and not call.get("disclosure_spoken") and call["state"] != states.VOICEMAIL)
+
     def _leaves(call: dict) -> bool:
         return bool(call["brief"]["limits"].get("voicemail_message"))
 
@@ -618,8 +624,7 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
             # the model's audio is dropped): it presses keys through the menu, and a person who
             # picks up hears the forced opening with the disclosure first. A voicemail greeting
             # ends the call without a message.
-            if ledger.stamp(iid, "disclosure_requested_at", clock()):
-                listen.add(iid)
+            if ledger.stamp(iid, "disclosure_requested_at", clock()):  # media sees: not spoken
                 store.add_event(iid, "listen_start", {})
                 await _start_stream(iid, ccid)
             return
@@ -712,7 +717,7 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
                               clock=clock, disclosed=bool(call.get("disclosure_spoken")),
                               press_keys=(lambda keys, cid: send_digits(ccid, keys, cid))
                               if ccid else None,
-                              listening=iid in listen)
+                              listening=_listens(row, call))
         if call["state"] == states.VOICEMAIL:
             session.notify_voicemail("machine_end_beep")  # stream began after the greeting
         sessions[iid] = session
@@ -721,7 +726,6 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
                                "callSid": ccid})
         finally:
             sessions.pop(iid, None)
-            listen.discard(iid)
             if ccid:  # a dropped stream must not leave the line open (hangup is idempotent);
                 carrier_pool.submit(quiet_hangup, ccid)  # submitted, so even cancellation sends it
             await _close(ws, 1000)
