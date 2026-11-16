@@ -189,7 +189,9 @@ a sensitive value the user did not consent to for this call, the plugin sends
 ### `POST /v1/calls/{call_id}/hangup`
 Body `{}`. The user's kill switch (`/phone hangup`). It is idempotent: `200` when the call is
 ending or has ended, `409` when it was already over (the plugin treats this as success too). The
-terminal state then comes back through `updates`.
+terminal state then comes back through `updates`. A business call handed to the voice service
+(below) is cancelled there: `200` once it is ending (its result then says `cancelled`), `409` when
+it had already ended, and `503 hangup_unavailable` when the voice service could not be asked.
 
 ## Running the shared bridge
 
@@ -222,6 +224,7 @@ older than their retention.
 | `HERMES_PHONE_BRIDGE_AUTH_URL` | Usage-token check URL. Unset turns the usage-token path off. |
 | `HERMES_PHONE_BRIDGE_OVERRIDES` | Optional JSON object, or a path to one: `{"<workspace>": {"daily_cap": 10, "timezone": "America/New_York", "disabled": true}}`. Defaults are 10 calls a day and America/New_York. A bad file refuses new calls. |
 | `HERMES_PHONE_BRIDGE_ROOM_URL` | Optional loopback allowance service (TeamShift's voice service, `/_internal/member-outbound`). Set, every dial first asks `admit` for the workspace's gw id (returned by the auth service as `front_door_instance`; an operator-minted token workspace uses its name) and is capped at the seconds granted; 0 answers `month_cap`, no answer or no gw id answers `allowance_unavailable` (fail closed). Each call is metered with `close` at hangup. The bearer is the `member_pin_key` credential file. |
+| `HERMES_PHONE_BUSINESS_CALL_URL`, `HERMES_PHONE_BUSINESS_RESULT_BASE` | Optional, together: hand business calls to TeamShift's voice service (GPT-Live, teamshift#2981) instead of dialing them here. The call URL is loopback `http://127.0.0.1:<port>/_internal/business-call` (bearer = `member_pin_key`); the result base is `http://127.0.0.1:<port>` or `http://172.22.0.1:<port>`, wherever the voice service reaches this bridge. See "Business calls" below. |
 | `HERMES_PHONE_ALLOW_ALL` | Off by default, so only allowlisted test numbers can be dialed. Production sets it to `1`. |
 | `HERMES_PHONE_BRIDGE_INBOUND` | `1` mounts the inbound callback stub (`POST /v1/telnyx/inbound`). Off by default; otherwise the bridge handles only webhooks for calls it placed. |
 | `HERMES_PHONE_BRIDGE_TRUST_PROXY` | On by default: the client address for rate limits is the first `X-Forwarded-For` entry, which the gate overwrites with one real address. The bridge listens on loopback only. `0` uses the socket address. |
@@ -232,7 +235,40 @@ Routes, all also under `/bridge/phone`: `GET /healthz`, `GET /v1/health`,
 `PUT /v1/calls/{call_id}`, `GET /v1/calls/{call_id}/updates`,
 `POST /v1/calls/{call_id}/questions/{question_id}/answer`, `POST /v1/calls/{call_id}/hangup`,
 `POST /v1/telnyx/calls/{internal_id}/{secret}` (signed call webhooks),
-`WS /v1/media/{internal_id}?token=<one-time>` (call audio), and the optional inbound stub.
+`WS /v1/media/{internal_id}?token=<one-time>` (call audio),
+`POST /v1/business/results/{internal_id}/{secret}` (handed-off business call results), and the
+optional inbound stub.
+
+### Business calls on the voice service
+
+With `HERMES_PHONE_BUSINESS_CALL_URL` set, `PUT /v1/calls/{call_id}` still checks the approval,
+quiet hours, the allowlist, the active call and the daily cap, then sends the call to the voice
+service once instead of dialing it. It is never retried, and it is sent in the background: the
+PUT answers `201` at once, and a refusal arrives as the call's `failed` result with its `reason`:
+`{call_id: <internal id>, workspace: <gw id>, number, brief: {goal, facts, disclosure,
+max_seconds <= 300, rules}, result_url}`. `facts` are the consent-filtered facts as `key: value`
+lines, `disclosure` is the bridge's own line. When the auth service reports a verified caller
+number for the workspace, the body also carries `caller_number` and
+`caller_auth: {name, token}`, the workspace's own `t-...` name and usage token from this
+request. The voice service checks both against the portal itself and otherwise dials from the
+shared line. An HMAC-token workspace never sends them.
+
+The voice service meters the allowance itself (`out_<internal id>`), so the bridge does not
+`admit` or `close` these calls. Its replies map to: `202` dialing; `429 allowance` →
+`month_cap`; `429 busy` → `rate_limited`; `400`, `409` or `200 failed` → `dial_failed`. With no
+reply at all the call may still have been placed, so it stays `dialing` and waits for its
+result (the reaper ends it 150 s after its cap of at most 300 s). A refused connection placed
+nothing and is `dial_failed`.
+
+The result comes once to `result_url` (the call's own secret is its only proof):
+`{call_id, state: completed|no_answer|machine|failed|cancelled, outcome, agreed, next_steps, seconds,
+transcript_tail}`. `completed` becomes `success` when something was agreed and
+`needs_followup` when nothing was; `machine` ends as
+`completed` with outcome `voicemail`; `cancelled` (the user hung up) ends as `aborted` with
+outcome `needs_followup`. The voice service re-sends an unconfirmed result after a
+restart, so a repeated result for the same call is answered `200 {"ok": true, "duplicate":
+true}` and changes nothing. A bridge restart does not end these calls: the voice service is
+still driving them.
 
 ## Versioning
 

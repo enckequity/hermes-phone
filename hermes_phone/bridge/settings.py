@@ -11,6 +11,7 @@ from pathlib import Path
 from .. import mode as modemod
 from .. import secrets as secretsmod
 from ..safety import ALLOW_ALL_ENV, ALLOWLIST_ENV
+from . import business as businessmod
 
 DEFAULT_MODEL = "gpt-realtime-2.1"
 DEFAULT_VOICE = "marin"
@@ -107,6 +108,10 @@ class BridgeSettings:
     caller_number: str = ""  # HERMES_PHONE_CALLER_NUMBER, the caller ID on every call
     telephony_usd_per_min: float = 0.0
     voice_usd_per_min: float = 0.0
+    # Business calls handed to linq-voice's GPT-Live stack (teamshift#2981); unset = the bridge dials them itself.
+    business_call_url: str = ""  # HERMES_PHONE_BUSINESS_CALL_URL, loopback .../_internal/business-call (bearer = room_key)
+    business_result_base: str = ""  # HERMES_PHONE_BUSINESS_RESULT_BASE, how linq-voice reaches this bridge
+    business_timeout_s: float = 30.0  # linq-voice answers once the dial is placed (up to 20 s) after a 5 s portal read
     environ: Mapping[str, str] = field(default_factory=dict, repr=False)
 
     @classmethod
@@ -158,6 +163,8 @@ class BridgeSettings:
             caller_number=env.get("HERMES_PHONE_CALLER_NUMBER") or "",
             telephony_usd_per_min=_rate(env.get("HERMES_PHONE_TELEPHONY_USD_PER_MIN")),
             voice_usd_per_min=_rate(env.get("HERMES_PHONE_VOICE_USD_PER_MIN")),
+            business_call_url=businessmod.call_url(env.get("HERMES_PHONE_BUSINESS_CALL_URL")),
+            business_result_base=businessmod.result_base(env.get("HERMES_PHONE_BUSINESS_RESULT_BASE")),
             model=env.get("HERMES_PHONE_MODEL") or DEFAULT_MODEL,
             voice=env.get("HERMES_PHONE_VOICE") or DEFAULT_VOICE,
             db_path=env.get("HERMES_PHONE_DB_PATH") or SHARED_DB_PATH,
@@ -185,6 +192,9 @@ class BridgeSettings:
                     "TELNYX_CONNECTION_ID": self.telnyx_connection_id,
                     "HERMES_PHONE_CALLER_NUMBER": self.caller_number,
                     "HERMES_PHONE_BRIDGE_PUBLIC_URL": self.public_base_url}
+            if self.business_call_url:
+                need["HERMES_PHONE_BUSINESS_RESULT_BASE"] = self.business_result_base
+                need["credential member_pin_key"] = self.room_key
             return [k for k, v in need.items() if not v]
         pairs = {
             "TWILIO_ACCOUNT_SID": self.twilio_account_sid,

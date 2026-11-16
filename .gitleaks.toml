@@ -1,0 +1,7 @@
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Reviewed false positives"
+# tests/test_business_handoff.py: NAME, TOKEN are made-up fixtures ("t-0123456789", "ts_usg_" + "a" * 64), not credentials.
+paths = ['''^tests/test_business_handoff\.py$''']
