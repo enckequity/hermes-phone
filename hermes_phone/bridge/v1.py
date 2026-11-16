@@ -452,21 +452,44 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
 
     def deliver(iid: str, req: dict, dialed: dict) -> None:
         status, reply = business.post(settings.business_call_url, settings.room_key, req, settings.business_timeout_s)
+        hung = store.hangup_requested(iid)  # the user hung up while the voice service had the request
         if status == 0:
             # No answer: the call may still have been placed, and it is never re-sent. It stays dialing until its result
             # arrives or the reaper ends it.
             log.warning("business call %s: no reply from the voice service; waiting for its result", iid)
             store.add_event(iid, "handoff_unconfirmed", {})
+            if hung:
+                cancel_there(iid)  # it may still dial: a 404 there is harmless
             return
         if code := business.refusal(status, reply):
             log.warning("business call %s refused (%s %s)", iid, status, str(reply.get("state") or "")[:20])
-            fail_call(iid, code)
+            if hung:  # cancelled there before it dialed: the user's hangup, not a failure
+                settle_hangup(iid)
+            else:
+                fail_call(iid, code)
             ledger.stamp(iid, "ended_at", clock())
             return
         store.add_event(iid, "handoff", {})
-        if store.hangup_requested(iid):  # the user hung up before the voice service had the call
-            business.cancel(settings.business_call_url, settings.room_key, iid, settings.business_timeout_s)
+        if hung:  # accepted after the hangup: cancel it now
+            cancel_there(iid)
         report_dialed(dialed)
+
+    def cancel_there(iid: str) -> int:
+        status = 0
+        for _ in range(2):  # once more after no answer or a server error
+            status = business.cancel(settings.business_call_url, settings.room_key, iid, settings.business_timeout_s)
+            if status in (200, 404, 409, 400):
+                break
+        if status != 200:
+            log.warning("business call %s: cancel answered %s", iid, status)
+        store.add_event(iid, "cancel_sent", {"status": status})
+        return status
+
+    def settle_hangup(iid: str) -> None:
+        store.set_result_once(iid, {"outcome": "needs_followup", "reason": "user_hangup",
+                                    "summary": "The user ended the call."}, "needs_followup")
+        if states.can_transition(store.get_call(iid)["state"], states.ABORTED):
+            states.transition(store, iid, states.ABORTED, reason="user_hangup")
 
     @app.post("/v1/business/results/{iid}/{secret}")
     async def business_result(iid: str, secret: str, request: Request) -> Response:
@@ -674,10 +697,7 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
             if status == 409:  # already ended or settled there: its result is on the way
                 return error("ended")
             if status == 404 and ledger.stamp(iid, "result_at", clock()):  # never placed there: no result will come
-                store.set_result_once(iid, {"outcome": "needs_followup", "reason": "user_hangup",
-                                            "summary": "The user ended the call."}, "needs_followup")
-                if states.can_transition(store.get_call(iid)["state"], states.ABORTED):
-                    states.transition(store, iid, states.ABORTED, reason="user_hangup")
+                settle_hangup(iid)
                 ledger.stamp(iid, "ended_at", clock())
                 return JSONResponse({"ok": True})
             if status == 404:

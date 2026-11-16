@@ -347,3 +347,29 @@ def test_caller_number_only_for_us_and_canada():
               result_url=BASE + "/v1/business/results/b1/s", caller_auth=auth)
     assert business.request(caller_number=OWN, **kw)["caller_number"] == OWN
     assert "caller_number" not in business.request(caller_number="+442071234567", **kw)
+
+
+@pytest.mark.parametrize("reply_status,reply,cancels", [(200, {"state": "failed"}, 0), (0, {}, 1)])
+def test_a_hangup_during_the_hand_off_is_never_reported_as_a_failure(hb, monkeypatch, reply_status, reply, cancels):
+    import threading
+    gate, calls = threading.Event(), []
+
+    def slow(url, key, body, timeout_s):
+        calls.append(body)
+        if body.get("action") == "cancel":
+            return 200, {"state": "cancelling"}  # recorded there: its own result will say cancelled
+        gate.wait(5)
+        return reply_status, reply  # 200 failed: cancelled before it dialed; 0: no answer at all
+    monkeypatch.setattr(business, "post", slow)
+    iid = hb.put("c1").json()["bridge_call_id"]
+    wait_for(lambda: calls)
+    assert hb.post("/v1/calls/c1/hangup", {}).status_code == 200
+    gate.set()
+    wait_for(lambda: len(calls) == 2 + cancels)
+    if reply_status == 200:
+        wait_for(lambda: hb.store.get_call(iid)["state"] == states.ABORTED)
+    call = hb.store.get_call(iid)
+    if reply_status == 200:
+        assert (call["state"], call["result"]["reason"]) == (states.ABORTED, "user_hangup")
+    else:
+        assert calls[-1] == {"call_id": iid, "action": "cancel"}  # it may still dial: cancelled again
