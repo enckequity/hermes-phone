@@ -240,6 +240,10 @@ class CallSession:
             await self._on_function_call(ev)
         elif etype == "error":
             err = ev.get("error") or {}
+            if self._open_when_done and err.get("code") == "response_cancel_not_active":
+                self._open_when_done = False  # nothing was running: open now, no 4 s pause
+                self.response_active = False
+                await self._send_opening()
             self.store.add_event(self.call_id, "realtime_error",
                                  {"code": str(err.get("code", ""))[:80],
                                   "message": str(err.get("message", ""))[:200]})
