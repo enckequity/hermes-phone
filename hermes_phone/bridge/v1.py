@@ -38,7 +38,6 @@ from .status import apply_status
 log = logging.getLogger(__name__)
 
 DISCLOSURE = "Hi, this is an AI assistant calling on behalf of {business_name}."
-DEFAULT_BUSINESS = "a local business"
 BUSINESS_MAX = 80
 _URL_RE = re.compile(r"(?i)\b(?:[a-z][a-z0-9+.-]*://\S*|www\.\S*|[\w-]+(?:\.[\w-]+)*"
                      r"\.(?:com|net|org|io|ai|co|app|dev|biz|info|us|me|xyz|link|ly)\b\S*)")
@@ -81,6 +80,7 @@ ERRORS: dict[str, tuple[int, str]] = {
     "allowance_unavailable": (503, "Call time for this workspace could not be checked right now."),
     "redial_too_soon": (422, "This number was just called. Automatic redial is not allowed."),
     "dial_failed": (502, "The call could not be placed."),
+    "name_required": (422, "Say who the call is for: the person's or the business's name."),
     "hangup_unavailable": (503, "The call could not be ended right now. Try again shortly."),
 }
 
@@ -128,6 +128,15 @@ def business_name(raw: Any) -> str:
         return ""
     text = _NAME_DROP_RE.sub(" ", _URL_RE.sub(" ", _CTRL_RE.sub(" ", raw)))
     return " ".join(text.split())[:BUSINESS_MAX].strip()
+
+
+def spoken_name(body: dict) -> str:
+    """Who the disclosure says the call is for: the workspace's business_name, the brief's user_name, then a name fact.
+    Placeholders ("my user", "a local business") never count; "" means the call cannot be made (#2872)."""
+    b = body.get("brief") if isinstance(body.get("brief"), dict) else {}
+    facts = b.get("facts") if isinstance(b.get("facts"), dict) else {}
+    cands = [body.get("business_name"), b.get("user_name"), *(facts.get(k) for k in briefmod.NAME_FACTS)]
+    return briefmod.resolve_name(*(business_name(c) for c in cands))
 
 
 def _sha(text: str) -> str:
@@ -354,6 +363,8 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
                 return error("approval_required")
             if ledger.approval_used(t.name, aid):
                 return error("conflict")
+            if not spoken_name(body):  # input, checked before any limit
+                return error("name_required")
             code, e164 = _limits(t, body.get("number"), now)
             if code:
                 return error(code)
@@ -584,8 +595,7 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
                     briefmod.clamp_duration(b.get("max_duration_s")))
         facts = b.get("facts") if isinstance(b.get("facts"), dict) else {}
         record = bool(b.get("record"))
-        business = (business_name(body.get("business_name")) or business_name(b.get("user_name"))
-                    or DEFAULT_BUSINESS)
+        business = spoken_name(body)  # checked non-empty by submit
         stored = {
             "opening_line": disclosure(business, record),  # the bridge's, never the plugin's
             "facts_raw": facts,
@@ -594,7 +604,7 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
                        "question_timeout_s": briefmod.clamp_question_timeout(
                            lim.get("question_timeout_s"))},
             "language": str(b.get("language") or "en")[:16],
-            "user_name": business_name(b.get("user_name")) or business,
+            "user_name": briefmod.resolve_name(business_name(b.get("user_name"))) or business,
         }
         iid = "b" + secrets.token_hex(12)
         secret = secrets.token_urlsafe(32)  # 43 chars

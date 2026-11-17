@@ -84,13 +84,13 @@ approval (`phone_call`).
 }
 ```
 
-- `business_name` (optional, top level; falls back to `brief.user_name`) is who the call is for.
-  The bridge strips URLs, keeps only `A-Z a-z 0-9 space & ' . , -` and cuts it to 80
-  characters (the same for `brief.user_name`). When a person answers, the carrier's own speech
-  plays the fixed disclosure, "Hi, this is an AI assistant calling on behalf of
-  {business_name}.", before the voice model is connected. `disclosure_spoken` is true only
-  when that playback completed; if it is cut off, the call is hung up. The voice model is told
-  the introduction was given and does not repeat it.
+- `business_name` (optional, top level) is who the call is for. Without it the bridge uses
+  `brief.user_name`, then a `name`, `business_name`, `booking_name`, `full_name` or
+  `owner_name` fact. Placeholders ("my user", "the customer", "a local business", ...) never
+  count, and a call with no real name is refused `422 name_required`, so a business always
+  hears a name. The bridge strips URLs, keeps only `A-Z a-z 0-9 space & ' . , -` and cuts it to
+  80 characters. The disclosure, "Hi, this is an AI assistant calling on behalf of {name}.", is
+  the opening of the voice model's (or the voice service's) first response.
 - `brief` is the plugin's `voice_payload`: the only data the voice model may ever see.
   `brief.facts` holds consented facts only. The client filters it a second time just before
   sending. The goal is redacted. CVV, passwords and one-time codes are dropped even with

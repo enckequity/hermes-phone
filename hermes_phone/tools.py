@@ -309,7 +309,14 @@ def _phone_prepare(args: Any, kwargs: Mapping[str, Any], retry_of: str = "") -> 
     if not quiet.ok:
         return _error(quiet.reason, quiet_hours=True)
 
-    user_name = str(svc.config("user_name", "") or "")
+    # Named in the disclosure: the brief's name, then the profile's owner or business name, then a name fact.
+    user_name = briefmod.resolve_name(args.get("on_behalf_of"), svc.config("user_name", ""),
+                                      svc.config("business_name", ""), facts=facts)
+    if not user_name:
+        return _error("on_behalf_of is required: the full name of the user or their business, which the call opens "
+                      "with (\"calling on behalf of ...\"). Use the name from their profile or memory; if you do not "
+                      "know it, ask the user, then prepare again. Never use a placeholder like \"my user\".",
+                      needs_name=True)
     brief = briefmod.build_brief(
         callee_name=callee, number=e164, number_source=source, goal=goal, facts=facts,
         sensitive_requested=requested, granted=set(), user_name=user_name,
@@ -518,6 +525,12 @@ SCHEMAS: dict[str, dict] = {
             "callee_name": {"type": "string",
                             "description": "Who is called, including any person the user "
                                            "named, e.g. \"Dr. Smith's dental office\""},
+            "on_behalf_of": {"type": "string",
+                             "description": "Who the call is for, by name, as the business should hear it: the "
+                                            "user's full name, or their business name when calling for the "
+                                            "business, e.g. \"Dakota Enck\" or \"TriCraft Services\". Fill it from "
+                                            "the user's profile or memory; ask the user only if you do not know "
+                                            "it. Never a placeholder like \"my user\"."},
             "number": {"type": "string", "description": "E.164, e.g. +14155550123"},
             "number_source": {"type": "string",
                               "description": "'user' or the URL where the number was found"},
@@ -548,7 +561,7 @@ SCHEMAS: dict[str, dict] = {
                 "type": "boolean", "default": False,
                 "description": "Shown on the approval card; only use if the user asked for a "
                                "call outside 08:00-21:00 callee time"},
-        }, "required": ["callee_name", "number", "goal"]},
+        }, "required": ["callee_name", "number", "goal", "on_behalf_of"]},
     },
     "phone_call": {
         "name": "phone_call",

@@ -305,7 +305,7 @@ def _cmd_retry(rest: list[str], kwargs: dict) -> str:
             requested.append(field)  # shown on the new card as needing consent
         facts.setdefault(key, value)
     lim = brief.get("limits", {})
-    args = {"callee_name": old["callee_name"], "number": old["number"],
+    args = {"callee_name": old["callee_name"], "number": old["number"], "on_behalf_of": brief.get("user_name", ""),
             "number_source": old.get("number_source") or "", "goal": old["goal"],
             "facts_to_share": facts, "sensitive_fields": requested,
             "language": brief.get("language", "en"), "max_duration_s": lim.get("max_duration_s"),

@@ -13,6 +13,9 @@ table for 4 at 20:00"). You have four tools: `phone_prepare`, `phone_call`, `pho
 1. **Get the number.** Use the number the user gave, or find it with web search and keep the
    source URL. If several candidates match, ask the user which one. Never guess a number.
 2. **Prepare.** Call `phone_prepare` with `callee_name`, `number` (E.164), `number_source`,
+   `on_behalf_of` (who the call is for, by name: the user's full name, or their business name
+   when calling for the business, from their profile or memory; the call opens "calling on
+   behalf of <name>", so never a placeholder, and ask the user only if you do not know it),
    `goal` (one full sentence) and `facts_to_share`: EVERY non-sensitive detail from the user's
    request that the callee may need. The voice agent knows nothing else, so include the person
    to see (the doctor or contact the user named, as `person_to_see`), service, date, time
