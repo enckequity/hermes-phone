@@ -416,3 +416,31 @@ def test_a_hangup_before_the_fallback_dials_nothing(hb, monkeypatch):
     wait_for(lambda: any(e["kind"] == "handoff_unavailable" for e in hb.store.events(iid)))
     assert hb.store.get_call(iid)["state"] == states.ABORTED
     assert not [p for p, _ in hb.tx.posts if p == "/calls"]
+
+
+def test_a_hangup_while_the_fallback_waits_for_the_allowance_never_rings(store, clock, voice, monkeypatch):
+    import threading
+    sb = Shared(store, clock, business_call_url=URL, business_result_base=BASE, room_key=PIN,
+                room_url="http://127.0.0.1:8788/_internal/member-outbound")
+    voice.status, voice.reply = 404, {}
+    gate, admits = threading.Event(), []
+
+    def slow_room(req, timeout=None):  # the allowance service, slow to admit
+        body = json.loads(req.data)
+        admits.append(body)
+        if body["action"] == "admit":
+            gate.wait(5)
+        import io
+        out = io.BytesIO(json.dumps({"seconds": 300} if body["action"] == "admit" else {"ok": True}).encode())
+        out.__enter__ = lambda *a: out
+        out.__exit__ = lambda *a: None
+        return out
+    monkeypatch.setattr("urllib.request.urlopen", slow_room)
+    with sb.client:
+        iid = sb.put("c1").json()["bridge_call_id"]
+        wait_for(lambda: admits)
+        assert sb.post("/v1/calls/c1/hangup", {}).status_code == 200
+        gate.set()
+        wait_for(lambda: any(b["action"] == "close" for b in admits))
+    assert not [p for p, _ in sb.tx.posts if p == "/calls"]  # the business never rang
+    assert sb.store.get_call(iid)["state"] == states.ABORTED

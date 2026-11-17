@@ -202,6 +202,10 @@ class Ledger:
         self.store._exec(f"INSERT INTO bridge_calls({cols}) VALUES({','.join('?' * len(row))})",
                          tuple(row.values()))
 
+    def clear_handoff(self, internal_id: str) -> None:
+        """The voice service did not take the call: it is an ordinary bridge call from here on."""
+        self.store._exec("UPDATE bridge_calls SET handoff_at=NULL WHERE internal_id=?", (internal_id,))
+
     def stamp(self, internal_id: str, column: str, value: float, *, once: bool = True) -> bool:
         assert column in _LEDGER_COLUMNS
         cond = f" AND {column} IS NULL" if once else ""
@@ -401,6 +405,12 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
         req = telnyx_io.dial_body(connection_id=settings.telnyx_connection_id, to=e164,
                                   from_=t.caller or settings.caller_number, webhook_url=hook,
                                   time_limit_s=max_d + DURATION_MARGIN_S)
+        if store.hangup_requested(iid) or store.get_call(iid)["state"] in states.TERMINAL:
+            # Hung up while the hand-off fell back or the allowance answered: never ring the business.
+            settle_hangup(iid)
+            if settings.room_url and key:
+                await in_carrier_pool(report_close, iid, t.name, 0)
+            return ""
         try:
             try:
                 data = await in_carrier_pool(telnyx.post, "/calls", req)
@@ -468,6 +478,8 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
         task = asyncio.ensure_future(deliver(t, iid, secret, e164, max_d, req, dialed))
         background.add(task)
         task.add_done_callback(background.discard)
+        task.add_done_callback(lambda done: done.cancelled() or not done.exception() or log.error(
+            "business hand-off for %s failed", iid, exc_info=done.exception()))
         return JSONResponse({"call_id": call_id, "state": states.DIALING, "bridge_call_id": iid}, status_code=201)
 
     async def deliver(t: auth.Workspace, iid: str, secret: str, e164: str, max_d: int, req: dict,
@@ -477,7 +489,7 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
         if business.unavailable(status, reply):
             # Business calls are off at the voice service (no `business` block: 404, or an explicit "disabled"). Nothing
             # was dialed there, so this call is dialed here instead: the voice config is the one on/off switch (#2872).
-            store._exec("UPDATE bridge_calls SET handoff_at=NULL WHERE internal_id=?", (iid,))
+            ledger.clear_handoff(iid)
             store.add_event(iid, "handoff_unavailable", {"status": status})
             if store.get_call(iid)["state"] in states.TERMINAL:  # the user hung up meanwhile: settled, never dialed
                 return
