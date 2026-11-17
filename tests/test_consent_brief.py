@@ -57,8 +57,20 @@ def test_redact_text():
 def test_opening_line():
     assert brief.opening_line("Winch") == "Hi, this is an AI assistant calling on behalf of Winch."
     assert brief.opening_line("Winch", True).endswith(" This call may be recorded.")
-    assert brief.opening_line("").startswith("Hi, this is an AI assistant")
-    assert brief.opening_line(None).startswith("Hi, this is an AI assistant")
+    for placeholder in ("", None, "my user", "The Customer", " a local business ", "user", "N/A"):
+        with pytest.raises(ValueError):  # a business never hears "on behalf of my user" (#2872)
+            brief.opening_line(placeholder)
+
+
+def test_resolve_name_skips_placeholders_and_falls_back_to_name_facts():
+    assert brief.resolve_name("my user", "", "TriCraft Services") == "TriCraft Services"
+    assert brief.resolve_name(None, facts={"name": "Dakota  Enck"}) == "Dakota Enck"
+    assert brief.resolve_name("the client", facts={"name": "my user"}) == ""
+    assert brief.resolve_name("Userland Bakery") == "Userland Bakery"  # only whole placeholders count
+    for placeholder in ("my wife", "the business owner", "the user's business", "my client's company", "Our Office"):
+        assert brief.is_generic_name(placeholder), placeholder
+    for real in ("Boss Burgers", "TriCraft Services", "Dakota", "Mom's Diner", "The Office Pub", "Dr. Patel"):
+        assert not brief.is_generic_name(real), real
 
 
 def test_clamp_and_cost():

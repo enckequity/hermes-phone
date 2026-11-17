@@ -100,7 +100,7 @@ def request(*, iid: str, workspace: str, number: str, payload: dict, max_seconds
             "facts": _facts_text(payload.get("facts") or {}),
             "disclosure": str(payload["opening_line"])[:DISCLOSURE_MAX],
             "max_seconds": max(MIN_SECONDS, min(MAX_SECONDS, int(max_seconds))),
-            "rules": rules_text(str(payload.get("user_name") or "the customer")),
+            "rules": rules_text(str(payload["user_name"])),  # always a real name: the bridge refuses calls without one
         },
     }
     if caller_number and caller_auth and caller_ok(caller_number):

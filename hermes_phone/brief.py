@@ -16,14 +16,36 @@ MAX_QUESTION_TIMEOUT_S = 120
 HARD_MAX_DURATION_S = 900
 MIN_DURATION_S = 30
 COST_PER_MINUTE_USD = 0.25  # rough Twilio + Realtime estimate, shown as an estimate only
-DEFAULT_USER_NAME = "my user"
+NAME_MAX = 80
+# Who the call is for, as a business hears it: never a placeholder ("calling on behalf of my user" sounds robotic, #2872).
+_GENERIC_NAME_RE = re.compile(
+    r"(?i)^\s*(?:(?:my|the|a|an|our|your|their|his|her)\s+)?"
+    r"(?:(?:user|customer|client|owner|boss|employer)(?:'s|s')?\s+)?(?:local\s+|small\s+)?"
+    r"(?:business\s+|company\s+)?"
+    r"(?:user|customer|client|owner|person|someone|somebody|business|company|caller|principal|boss|employer|human|"
+    r"me|them|him|her|unknown|n/?a|none|null|wife|husband|partner|spouse|mom|mum|dad|mother|father|parent|family|"
+    r"friend|son|daughter|kid|child|manager|team|office|store|shop|household|account holder|patient|member)s?\s*$")
+NAME_FACTS = ("business_name", "name", "booking_name", "full_name", "owner_name")
 WONT_SHARE_ALWAYS = "card data, address, ID numbers, anything not listed above"
 
 
+def is_generic_name(name: Any) -> bool:
+    return not isinstance(name, str) or not " ".join(name.split()) or bool(_GENERIC_NAME_RE.match(name))
+
+
+def resolve_name(*candidates: Any, facts: dict | None = None) -> str:
+    """The first real person or business name among the candidates, then the facts' name fields; "" when none."""
+    for value in (*candidates, *((facts or {}).get(k) for k in NAME_FACTS)):
+        if not is_generic_name(value):
+            return " ".join(str(value).split())[:NAME_MAX]
+    return ""
+
+
 def opening_line(user_name: str, record: bool = False) -> str:
-    """First thing the callee hears. AI disclosure is always the first sentence."""
-    name = (user_name or "").strip() or DEFAULT_USER_NAME
-    line = DISCLOSURE.format(user_name=name)
+    """First thing the callee hears. AI disclosure is always the first sentence, naming who the call is for."""
+    if is_generic_name(user_name):
+        raise ValueError("on_behalf_of is required: the person or business this call is for, by name")
+    line = DISCLOSURE.format(user_name=" ".join(user_name.split())[:NAME_MAX])
     if record:
         line += " " + RECORDED
     return line
@@ -84,7 +106,7 @@ def build_brief(*, callee_name: str, number: str, number_source: str, goal: str,
         },
         "language": language,
         "quiet_hours_override": bool(quiet_hours_override),
-        "user_name": (user_name or "").strip() or DEFAULT_USER_NAME,
+        "user_name": " ".join(user_name.split())[:NAME_MAX],
     }
 
 
@@ -99,11 +121,15 @@ def refresh_brief(call: dict, granted: set[str]) -> dict:
 
 
 def _rebuild(call: dict, old: dict, granted: set[str]) -> dict:
+    # A card prepared before names were required may hold the old "my user": use a name fact, or ask for a new card.
+    name = resolve_name(old.get("user_name"), facts=old.get("facts_raw") or {})
+    if not name:
+        raise ValueError("This card does not say who the call is for. Ask me to prepare the call again with your name.")
     return build_brief(
         callee_name=call["callee_name"], number=call["number"],
         number_source=call.get("number_source") or "", goal=call["goal"],
         facts=old.get("facts_raw", {}), sensitive_requested=old.get("sensitive_requested", []),
-        granted=granted, user_name=old.get("user_name", ""),
+        granted=granted, user_name=name,
         max_duration_s=old["limits"]["max_duration_s"], record=old["limits"]["recording"],
         leave_voicemail=old["limits"]["voicemail_message"], language=old.get("language", "en"),
         quiet_hours_override=old.get("quiet_hours_override", False),

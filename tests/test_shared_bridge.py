@@ -1189,3 +1189,18 @@ def test_an_undelivered_dialed_report_never_fails_or_blocks_the_call(store, cloc
     assert r.status_code == 201 and r.json()["state"] == states.DIALING
     wait_for(lambda: any(b["action"] == "dialed" for b, _ in room.sent))
 
+
+
+def test_the_disclosure_names_who_the_call_is_for_never_a_placeholder(sb):
+    body = sb.body("c1", user_name="my user")
+    body.pop("business_name")
+    body["brief"]["facts"] = {"name": "Dakota"}  # an older plugin's placeholder, with the name in the facts
+    r = sb.put("c1", body=body)
+    assert r.status_code == 201, r.text
+    assert sb.store.get_call(r.json()["bridge_call_id"])["brief"]["opening_line"] == (
+        "Hi, this is an AI assistant calling on behalf of Dakota.")
+    body = sb.body("c2", number=OTHER_NUMBER, user_name="my user")
+    body.pop("business_name")
+    body["brief"]["facts"] = {}
+    r = sb.put("c2", body=body)
+    assert r.status_code == 422 and r.json()["error"]["code"] == "name_required"

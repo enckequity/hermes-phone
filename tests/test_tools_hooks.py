@@ -410,3 +410,32 @@ def test_card_turn_reply_is_rewritten_to_the_pointer_once(svc):
     assert pointer == "\U0001F446"
     assert hooks.transform_llm_output(response_text="later reply", session_id="S9") is None
     assert hooks.transform_llm_output(response_text="x", session_id="other") is None
+
+
+def test_prepare_names_who_the_call_is_for(svc, ctx):
+    out = prepare({"on_behalf_of": "TriCraft Services"})  # the brief's name wins over the profile's
+    assert out["brief"]["opening_line"] == "Hi, this is an AI assistant calling on behalf of TriCraft Services."
+
+
+def test_prepare_without_any_real_name_asks_for_one(svc, ctx):
+    ctx.config.pop("user_name")
+    out = prepare({"on_behalf_of": "my user", "facts_to_share": {"party_size": 4}})
+    assert out.get("needs_name") and "on_behalf_of" in out["error"] and not svc.store._all("SELECT id FROM calls")
+    out = prepare({"on_behalf_of": "", "facts_to_share": {"name": "Dakota Enck"}})
+    assert out["brief"]["opening_line"].endswith("on behalf of Dakota Enck.")
+
+
+def test_on_behalf_of_is_a_required_tool_field():
+    assert "on_behalf_of" in tools.SCHEMAS["phone_prepare"]["parameters"]["required"]
+
+
+def test_consent_on_a_card_from_before_names_were_required(svc):
+    facts = {"party_size": 4, "home_address": SECRET_ADDR}
+    cid = prepare({"facts_to_share": facts, "sensitive_fields": ["address"]})["call_id"]
+    call = svc.store.get_call(cid)
+    svc.store.update_brief(cid, dict(call["brief"], user_name="my user"))  # what an older plugin stored
+    msg = commands.phone_command(f"consent {cid} address")
+    assert "prepare the call again" in msg and "address" not in svc.store.consents(cid)  # nothing half-done
+    svc.store.update_brief(cid, dict(svc.store.get_call(cid)["brief"], facts_raw={**facts, "name": "Dakota"}))
+    msg = commands.phone_command(f"consent {cid} address")
+    assert "recorded" in msg and "on behalf of Dakota" in json.dumps(svc.store.get_call(cid)["brief"])

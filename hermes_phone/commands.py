@@ -208,6 +208,10 @@ def _cmd_consent(rest: list[str], kwargs: dict) -> str:
                        "question that is waiting for you (see its card).")
     if call["state"] not in (states.AWAITING_APPROVAL, states.APPROVED):
         return f"Call {call_id} is {call['state']}; consent can only be given before dialing."
+    try:  # checked before the consent is recorded, so a refusal changes nothing
+        briefmod.refresh_brief(call, store.consents(call_id) | {field})
+    except ValueError as exc:
+        return str(exc)
     store.grant_consent(call_id, field, user)
     new = briefmod.refresh_brief(call, store.consents(call_id))
     old = call["brief"]
@@ -305,7 +309,7 @@ def _cmd_retry(rest: list[str], kwargs: dict) -> str:
             requested.append(field)  # shown on the new card as needing consent
         facts.setdefault(key, value)
     lim = brief.get("limits", {})
-    args = {"callee_name": old["callee_name"], "number": old["number"],
+    args = {"callee_name": old["callee_name"], "number": old["number"], "on_behalf_of": brief.get("user_name", ""),
             "number_source": old.get("number_source") or "", "goal": old["goal"],
             "facts_to_share": facts, "sensitive_fields": requested,
             "language": brief.get("language", "en"), "max_duration_s": lim.get("max_duration_s"),
