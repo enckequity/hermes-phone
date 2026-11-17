@@ -427,3 +427,15 @@ def test_prepare_without_any_real_name_asks_for_one(svc, ctx):
 
 def test_on_behalf_of_is_a_required_tool_field():
     assert "on_behalf_of" in tools.SCHEMAS["phone_prepare"]["parameters"]["required"]
+
+
+def test_consent_on_a_card_from_before_names_were_required(svc):
+    facts = {"party_size": 4, "home_address": SECRET_ADDR}
+    cid = prepare({"facts_to_share": facts, "sensitive_fields": ["address"]})["call_id"]
+    call = svc.store.get_call(cid)
+    svc.store.update_brief(cid, dict(call["brief"], user_name="my user"))  # what an older plugin stored
+    msg = commands.phone_command(f"consent {cid} address")
+    assert "prepare the call again" in msg and "address" not in svc.store.consents(cid)  # nothing half-done
+    svc.store.update_brief(cid, dict(svc.store.get_call(cid)["brief"], facts_raw={**facts, "name": "Dakota"}))
+    msg = commands.phone_command(f"consent {cid} address")
+    assert "recorded" in msg and "on behalf of Dakota" in json.dumps(svc.store.get_call(cid)["brief"])

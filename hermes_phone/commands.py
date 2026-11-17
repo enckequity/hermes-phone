@@ -208,6 +208,10 @@ def _cmd_consent(rest: list[str], kwargs: dict) -> str:
                        "question that is waiting for you (see its card).")
     if call["state"] not in (states.AWAITING_APPROVAL, states.APPROVED):
         return f"Call {call_id} is {call['state']}; consent can only be given before dialing."
+    try:  # checked before the consent is recorded, so a refusal changes nothing
+        briefmod.refresh_brief(call, store.consents(call_id) | {field})
+    except ValueError as exc:
+        return str(exc)
     store.grant_consent(call_id, field, user)
     new = briefmod.refresh_brief(call, store.consents(call_id))
     old = call["brief"]

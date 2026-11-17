@@ -67,6 +67,10 @@ def test_resolve_name_skips_placeholders_and_falls_back_to_name_facts():
     assert brief.resolve_name(None, facts={"name": "Dakota  Enck"}) == "Dakota Enck"
     assert brief.resolve_name("the client", facts={"name": "my user"}) == ""
     assert brief.resolve_name("Userland Bakery") == "Userland Bakery"  # only whole placeholders count
+    for placeholder in ("my wife", "the business owner", "the user's business", "my client's company", "Our Office"):
+        assert brief.is_generic_name(placeholder), placeholder
+    for real in ("Boss Burgers", "TriCraft Services", "Dakota", "Mom's Diner", "The Office Pub", "Dr. Patel"):
+        assert not brief.is_generic_name(real), real
 
 
 def test_clamp_and_cost():

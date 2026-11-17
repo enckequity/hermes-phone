@@ -85,8 +85,8 @@ approval (`phone_call`).
 ```
 
 - `business_name` (optional, top level) is who the call is for. Without it the bridge uses
-  `brief.user_name`, then a `name`, `business_name`, `booking_name`, `full_name` or
-  `owner_name` fact. Placeholders ("my user", "the customer", "a local business", ...) never
+  `brief.user_name`, then the first of the `business_name`, `name`, `booking_name`,
+  `full_name` and `owner_name` facts. Placeholders ("my user", "the customer", "a local business", ...) never
   count, and a call with no real name is refused `422 name_required`, so a business always
   hears a name. The bridge strips URLs, keeps only `A-Z a-z 0-9 space & ' . , -` and cuts it to
   80 characters. The disclosure, "Hi, this is an AI assistant calling on behalf of {name}.", is
