@@ -371,6 +371,14 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
             iid, secret, max_d = _create(t, call_id, aid, e164, body, now)
         if settings.business_call_url:
             return await hand_off(t, request, call_id, iid, secret, e164, max_d)
+        if code := await dial_native(t, iid, secret, e164, max_d):
+            return error(code)
+        return JSONResponse({"call_id": call_id, "state": states.DIALING,
+                             "bridge_call_id": iid}, status_code=201)
+
+    async def dial_native(t: auth.Workspace, iid: str, secret: str, e164: str, max_d: int) -> str:
+        """Dial the call on the bridge itself (Telnyx + Realtime): "" when placed, else the error code it was settled with."""
+        key = ""
         if settings.room_url:
             # One monthly allowance per workspace, shared with its inbound calls. The key is the gw id the auth service returned (a
             # workspace cannot name another's); no answer, no gw id or no time left means no call. Fail closed.
@@ -386,7 +394,7 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
                 store.set_result_once(iid, {"outcome": "failed", "reason": code, "summary": ERRORS[code][1]}, "failed")
                 if states.can_transition(store.get_call(iid)["state"], states.FAILED):
                     states.transition(store, iid, states.FAILED, reason=code, outcome="failed")
-                return error(code)
+                return code
             max_d = min(max_d, granted)
         hook = f"{settings.public_base_url}/v1/telnyx/calls/{iid}/{secret}"
         # The workspace's own verified number when it has one (enckequity/teamshift#2908), else the shared line.
@@ -416,7 +424,7 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
             if states.can_transition(store.get_call(iid)["state"], states.FAILED):  # not aborted
                 states.transition(store, iid, states.FAILED, reason="dial_failed",
                                   outcome="failed")
-            return error("dial_failed")
+            return "dial_failed"
         store.update_call(iid, provider_sid=ccid)
         if settings.room_url and key:
             # A business that calls the shared line back reaches the workspace that called it (enckequity/teamshift#2907).
@@ -427,8 +435,7 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
                                           "callee": str(call.get("callee_name") or "")[:200], "about": about})
         if store.hangup_requested(iid):  # the user hung up while we were dialing
             await carrier(ccid, "hangup")
-        return JSONResponse({"call_id": call_id, "state": states.DIALING,
-                             "bridge_call_id": iid}, status_code=201)
+        return ""
 
     def fail_call(iid: str, code: str) -> None:
         store.set_result_once(iid, {"outcome": "failed", "reason": code, "summary": ERRORS[code][1]}, "failed")
@@ -458,11 +465,24 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
                   "about": " ".join(str(call.get("goal") or "").split())[:DIALED_ABOUT_MAX]}
         # The voice service answers only once the dial is placed (up to ~25 s), longer than the plugin waits for this PUT, so it
         # is asked in the background; a refusal becomes this call's failed result in updates.
-        in_background(deliver, iid, req, dialed)
+        task = asyncio.ensure_future(deliver(t, iid, secret, e164, max_d, req, dialed))
+        background.add(task)
+        task.add_done_callback(background.discard)
         return JSONResponse({"call_id": call_id, "state": states.DIALING, "bridge_call_id": iid}, status_code=201)
 
-    def deliver(iid: str, req: dict, dialed: dict) -> None:
-        status, reply = business.post(settings.business_call_url, settings.room_key, req, settings.business_timeout_s)
+    async def deliver(t: auth.Workspace, iid: str, secret: str, e164: str, max_d: int, req: dict,
+                      dialed: dict) -> None:
+        status, reply = await in_carrier_pool(business.post, settings.business_call_url, settings.room_key, req,
+                                              settings.business_timeout_s)
+        if business.unavailable(status, reply):
+            # Business calls are off at the voice service (no `business` block: 404, or an explicit "disabled"). Nothing
+            # was dialed there, so this call is dialed here instead: the voice config is the one on/off switch (#2872).
+            store._exec("UPDATE bridge_calls SET handoff_at=NULL WHERE internal_id=?", (iid,))
+            store.add_event(iid, "handoff_unavailable", {"status": status})
+            if store.get_call(iid)["state"] in states.TERMINAL:  # the user hung up meanwhile: settled, never dialed
+                return
+            await dial_native(t, iid, secret, e164, max_d)  # settles its own failures
+            return
         hung = store.hangup_requested(iid)  # the user hung up while the voice service had the request
         if status == 0:
             # No answer: the call may still have been placed, and it is never re-sent. It stays dialing until its result
@@ -470,7 +490,7 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
             log.warning("business call %s: no reply from the voice service; waiting for its result", iid)
             store.add_event(iid, "handoff_unconfirmed", {})
             if hung:
-                cancel_there(iid)  # it may still dial: a 404 there is harmless
+                await in_carrier_pool(cancel_there, iid)  # it may still dial: a 404 there is harmless
             return
         if code := business.refusal(status, reply):
             log.warning("business call %s refused (%s %s)", iid, status, str(reply.get("state") or "")[:20])
@@ -482,8 +502,8 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
             return
         store.add_event(iid, "handoff", {})
         if hung:  # accepted after the hangup: cancel it now
-            cancel_there(iid)
-        report_dialed(dialed)
+            await in_carrier_pool(cancel_there, iid)
+        await in_carrier_pool(report_dialed, dialed)
 
     def cancel_there(iid: str) -> int:
         status = 0

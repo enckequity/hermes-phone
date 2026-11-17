@@ -39,7 +39,9 @@ def voice(monkeypatch):
 
 @pytest.fixture
 def hb(store, clock, voice):
-    return Shared(store, clock, business_call_url=URL, business_result_base=BASE, room_key=PIN)
+    sb = Shared(store, clock, business_call_url=URL, business_result_base=BASE, room_key=PIN)
+    with sb.client:  # keep the app's event loop running between requests, as uvicorn does: the hand-off is a task
+        yield sb
 
 
 def put(sb: Shared, voice: Voice, cid: str = "c1", **kw):
@@ -65,10 +67,10 @@ def result_path_of(voice: Voice, n: int) -> str:
 
 def send_result(sb: Shared, path: str, **kw):
     body = {"call_id": path.split("/")[4], "state": "completed", "outcome": "Booked for Friday 7 pm.",
-            "agreed": "Friday 7 pm, table for 4, name Winch", "next_steps": "", "seconds": 84.4,
+            "agreed": "Friday 7 pm, table for 4, name Winch", "next_steps": "", "seconds": 84.4, "result": "success",
             "transcript_tail": "You: Hi, this is an AI assistant calling on behalf of Acme Plumbing.\n"
                                "Them: Sure, Friday at 7 works.", **kw}
-    return sb.client.post(path, json=body)
+    return sb.client.post(path, json={k: v for k, v in body.items() if v is not None})  # None drops a field
 
 
 def test_hands_off_instead_of_dialing(hb, voice):
@@ -131,7 +133,7 @@ def test_result_settles_the_call_once_and_a_repeat_is_ignored(hb, voice):
     r = send_result(hb, path)
     assert r.status_code == 200 and r.json() == {"ok": True}
     call = hb.store.get_call(iid)
-    assert call["state"] == states.COMPLETED and call["outcome"] == "success"
+    assert call["state"] == states.COMPLETED and call["outcome"] == "success"  # send_result sends result: success
     assert call["result"]["agreed"] == {"notes": "Friday 7 pm, table for 4, name Winch"}
     assert call["result"]["summary"] == "Booked for Friday 7 pm." and call["duration_s"] == 84
     up = hb.get("/v1/calls/c1/updates").json()
@@ -174,15 +176,21 @@ def test_other_results(hb, voice, state, final, outcome):
     assert (call["state"], call["outcome"]) == (final, outcome)
 
 
-def test_agreed_is_success_even_with_next_steps(hb, voice):
+@pytest.mark.parametrize("verdict,agreed,outcome", [
+    ("success", "Friday 8 AM to noon", "success"),
+    ("needs_followup", "No confirmed opening hours were given.", "needs_followup"),
+    (None, "No confirmed opening hours were given.", "partial"),  # prose alone is never a success
+    ("bogus", "Friday 8 AM to noon", "partial"),
+])
+def test_outcome_follows_linq_voices_verdict(hb, voice, verdict, agreed, outcome):
     iid = put(hb, voice).json()["bridge_call_id"]
-    send_result(hb, result_path(voice), next_steps="Confirm 9 am instead of 10 am.")
-    assert hb.store.get_call(iid)["outcome"] == "success"  # linq-voice fills next_steps even for a done deal
+    send_result(hb, result_path(voice), agreed=agreed, result=verdict)
+    assert hb.store.get_call(iid)["outcome"] == outcome
 
 
 def test_nothing_agreed_is_followup(hb, voice):
     iid = put(hb, voice).json()["bridge_call_id"]
-    send_result(hb, result_path(voice), agreed="", outcome="They will call back with prices.")
+    send_result(hb, result_path(voice), agreed="", outcome="They will call back with prices.", result=None)
     assert hb.store.get_call(iid)["outcome"] == "needs_followup"
 
 
@@ -373,3 +381,38 @@ def test_a_hangup_during_the_hand_off_is_never_reported_as_a_failure(hb, monkeyp
         assert (call["state"], call["result"]["reason"]) == (states.ABORTED, "user_hangup")
     else:
         assert calls[-1] == {"call_id": iid, "action": "cancel"}  # it may still dial: cancelled again
+
+
+@pytest.mark.parametrize("status,reply", [(404, {}), (503, {"state": "disabled"}), (200, {"state": "disabled"})])
+def test_business_calls_off_at_the_voice_service_dial_here(hb, voice, status, reply):
+    voice.status, voice.reply = status, reply  # no `business` block there: the route is not served
+    iid = put(hb, voice).json()["bridge_call_id"]
+    wait_for(lambda: [p for p, _ in hb.tx.posts if p == "/calls"])  # dialed here instead, once
+    dials = [b for p, b in hb.tx.posts if p == "/calls"]
+    assert len(dials) == 1 and dials[0]["to"] == "+12125550123" and f"/{iid}/" in dials[0]["webhook_url"]
+    assert len(voice.calls) == 1  # never asked twice
+    wait_for(lambda: hb.store.get_call(iid)["provider_sid"])
+    row = hb.store._one("SELECT handoff_at FROM bridge_calls WHERE internal_id=?", (iid,))
+    assert row["handoff_at"] is None and hb.store.get_call(iid)["state"] == states.DIALING
+    # an ordinary bridge call from here on: the hand-off result route no longer knows it
+    assert send_result(hb, result_path(voice)).status_code == 404
+
+
+def test_a_hangup_before_the_fallback_dials_nothing(hb, monkeypatch):
+    import threading
+    gate, calls = threading.Event(), []
+
+    def off(url, key, body, timeout_s):
+        calls.append(body)
+        if body.get("action") == "cancel":
+            return 404, {}  # the voice service never had it
+        gate.wait(5)
+        return 404, {}
+    monkeypatch.setattr(business, "post", off)
+    iid = hb.put("c1").json()["bridge_call_id"]
+    wait_for(lambda: calls)
+    assert hb.post("/v1/calls/c1/hangup", {}).status_code == 200
+    gate.set()
+    wait_for(lambda: any(e["kind"] == "handoff_unavailable" for e in hb.store.events(iid)))
+    assert hb.store.get_call(iid)["state"] == states.ABORTED
+    assert not [p for p, _ in hb.tx.posts if p == "/calls"]

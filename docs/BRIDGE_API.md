@@ -255,15 +255,20 @@ shared line. An HMAC-token workspace never sends them.
 
 The voice service meters the allowance itself (`out_<internal id>`), so the bridge does not
 `admit` or `close` these calls. Its replies map to: `202` dialing; `429 allowance` →
-`month_cap`; `429 busy` → `rate_limited`; `400`, `409` or `200 failed` → `dial_failed`. With no
+`month_cap`; `429 busy` → `rate_limited`; `400`, `409` or `200 failed` → `dial_failed`. A `404` (the voice service serves the route only while its `business`
+config block is set) or a reply with `state: disabled` means business calls are off there:
+nothing was dialed, so the bridge dials that call itself, as without
+`HERMES_PHONE_BUSINESS_CALL_URL`. The voice config block is the one on/off switch; the bridge env
+can stay. With no
 reply at all the call may still have been placed, so it stays `dialing` and waits for its
 result (the reaper ends it 150 s after its cap of at most 300 s). A refused connection placed
 nothing and is `dial_failed`.
 
 The result comes once to `result_url` (the call's own secret is its only proof):
-`{call_id, state: completed|no_answer|machine|failed|cancelled, outcome, agreed, next_steps, seconds,
-transcript_tail}`. `completed` becomes `success` when something was agreed and
-`needs_followup` when nothing was; `machine` ends as
+`{call_id, state: completed|no_answer|machine|failed|cancelled, result?, outcome, agreed, next_steps, seconds,
+transcript_tail}`. an optional `result` (`success`, `partial`, `needs_followup` or `failed`) is
+the outcome of a `completed` call; without it, something in `agreed` is `partial` (prose cannot
+say whether it was a deal) and nothing is `needs_followup`; `machine` ends as
 `completed` with outcome `voicemail`; `cancelled` (the user hung up) ends as `aborted` with
 outcome `needs_followup`. The voice service re-sends an unconfirmed result after a
 restart, so a repeated result for the same call is answered `200 {"ok": true, "duplicate":
