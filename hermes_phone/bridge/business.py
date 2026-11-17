@@ -139,6 +139,12 @@ def cancel(url: str, key: str, iid: str, timeout_s: float) -> int:
     return post(url, key, {"call_id": iid, "action": "cancel"}, timeout_s)[0]
 
 
+def unavailable(status: int, reply: dict) -> bool:
+    """Business calls are off at linq-voice: its route is not served without the `business` block (404), or it says so.
+    Nothing was dialed there, so the bridge may dial the call itself."""
+    return status == 404 or reply.get("state") == "disabled"
+
+
 def refusal(status: int, reply: dict) -> str:
     """The bridge error code for a reply that did not start a call, or "" for 202 dialing."""
     if status == 202:
@@ -157,7 +163,9 @@ def parse_result(body: Any) -> dict | None:
         seconds = max(0, min(MAX_SECONDS + 120, int(round(float(body.get("seconds") or 0)))))
     except (TypeError, ValueError):
         seconds = 0
+    kind = body.get("result")  # linq-voice's own verdict, when it sends one
     return {"state": body["state"], **text, "seconds": seconds,
+            "result": kind if kind in ("success", "partial", "needs_followup", "failed") else "",
             "transcript_tail": str(body.get("transcript_tail") or "")[-TAIL_MAX:]}
 
 
@@ -166,8 +174,11 @@ def outcome_of(res: dict) -> str:
     path_outcome = _PATHS[res["state"]][1]
     if path_outcome:
         return path_outcome
-    # linq-voice's end_call fills next_steps even for a done deal ("arrive 10 min early"), so agreed alone means success.
-    return "success" if res["agreed"].strip() else "needs_followup"
+    if res["result"]:  # an explicit verdict from the end_call that settled the call
+        return res["result"]
+    # Without one, prose in agreed cannot say whether anything was agreed ("No confirmed hours were given" is text
+    # too, canary 2026-11-17), so it is never reported as a success: the user checks the summary.
+    return "partial" if res["agreed"].strip() else "needs_followup"
 
 
 def path_of(res: dict) -> tuple[str, ...]:
