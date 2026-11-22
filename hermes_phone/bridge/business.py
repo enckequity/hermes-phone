@@ -75,7 +75,12 @@ def _facts_text(facts: dict) -> str:
     return out[:FACTS_MAX]
 
 
-def rules_text(user_name: str) -> str:
+def rules_text(user_name: str, inquiry_only: bool = False) -> str:
+    if inquiry_only:
+        return (f"You call on behalf of {user_name}. Inquiry only: ask your questions and listen. Never book, "
+                "schedule, accept or pencil in any offer, agree to any charge, give consent or accept any terms; "
+                f"if asked to commit, say {user_name} will decide and call back. Never share anything that is not "
+                "in the facts. Before ending, repeat the answers back; agreed is always empty.")[:RULES_MAX]
     return (f"You call on behalf of {user_name}. There is no one to check with during the call: never put "
             "the business on hold. Negotiate: if an offer is outside the preference, ask for alternatives first, "
             "then accept the best offer that fits the preference or anything the facts call acceptable. "
@@ -100,7 +105,7 @@ def request(*, iid: str, workspace: str, number: str, payload: dict, max_seconds
             "facts": _facts_text(payload.get("facts") or {}),
             "disclosure": str(payload["opening_line"])[:DISCLOSURE_MAX],
             "max_seconds": max(MIN_SECONDS, min(MAX_SECONDS, int(max_seconds))),
-            "rules": rules_text(str(payload["user_name"])),  # always a real name: the bridge refuses calls without one
+            "rules": rules_text(str(payload["user_name"]), bool(payload.get("inquiry_only"))),  # always a real name: the bridge refuses calls without one
         },
     }
     if caller_number and caller_auth and caller_ok(caller_number):

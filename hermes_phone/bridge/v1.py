@@ -637,6 +637,7 @@ def register(app: FastAPI, *, settings: BridgeSettings, store: Store,
                            lim.get("question_timeout_s"))},
             "language": str(b.get("language") or "en")[:16],
             "user_name": briefmod.resolve_name(business_name(b.get("user_name"))) or business,
+            "inquiry_only": bool(b.get("inquiry_only")),
         }
         iid = "b" + secrets.token_hex(12)
         secret = secrets.token_urlsafe(32)  # 43 chars
