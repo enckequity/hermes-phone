@@ -289,7 +289,7 @@ def summary(slug: str, environ: dict | None = None) -> dict:
             for e in r.get("entries") or [r]:
                 if e.get("entry_id"):
                     names[e["entry_id"]] = e.get("name") or e.get("callee") or ""
-        elif r.get("kind") == "answer":
+        elif r.get("kind") == "answer" and r.get("entry_id"):
             answers[r["entry_id"]] = r
     return {"playbook": slug, "opted_in": opted_in(slug, environ),
             "answers": [{"entry_id": k, "name": names.get(k, ""), **{
