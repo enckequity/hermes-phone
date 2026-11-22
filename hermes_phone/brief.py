@@ -85,7 +85,8 @@ def build_brief(*, callee_name: str, number: str, number_source: str, goal: str,
                 facts: dict[str, Any], sensitive_requested: list[str], granted: set[str],
                 user_name: str, max_duration_s: int, record: bool, leave_voicemail: bool,
                 language: str, quiet_hours_override: bool,
-                question_timeout_s: int = DEFAULT_QUESTION_TIMEOUT_S) -> dict:
+                question_timeout_s: int = DEFAULT_QUESTION_TIMEOUT_S,
+                inquiry_only: bool = False) -> dict:
     safe, withheld = consent.build_safe_facts(facts, granted)
     needs_consent = [f for f in sensitive_requested if f not in granted]
     return {
@@ -106,6 +107,7 @@ def build_brief(*, callee_name: str, number: str, number_source: str, goal: str,
         },
         "language": language,
         "quiet_hours_override": bool(quiet_hours_override),
+        "inquiry_only": bool(inquiry_only),
         "user_name": " ".join(user_name.split())[:NAME_MAX],
     }
 
@@ -133,7 +135,8 @@ def _rebuild(call: dict, old: dict, granted: set[str]) -> dict:
         max_duration_s=old["limits"]["max_duration_s"], record=old["limits"]["recording"],
         leave_voicemail=old["limits"]["voicemail_message"], language=old.get("language", "en"),
         quiet_hours_override=old.get("quiet_hours_override", False),
-        question_timeout_s=old["limits"].get("question_timeout_s", DEFAULT_QUESTION_TIMEOUT_S))
+        question_timeout_s=old["limits"].get("question_timeout_s", DEFAULT_QUESTION_TIMEOUT_S),
+        inquiry_only=bool(old.get("inquiry_only")))
 
 
 def voice_payload(call: dict, granted: set[str]) -> dict:
@@ -155,6 +158,7 @@ def voice_payload(call: dict, granted: set[str]) -> dict:
         "record": brief["limits"]["recording"],
         "leave_voicemail": brief["limits"]["voicemail_message"],
         "user_name": brief["user_name"],
+        "inquiry_only": bool(brief.get("inquiry_only")),
     }
 
 
@@ -184,6 +188,8 @@ def format_card(brief: dict, call_id: str) -> str:
     )
     if brief["quiet_hours_override"]:
         lines.append("Quiet hours override: yes")
+    if brief.get("inquiry_only"):
+        lines.append("Inquiry only: the agent asks and listens; it books or agrees to nothing")
     lines.append('Reply "call" to dial or "cancel".')
     return "\n".join(lines)
 

@@ -298,6 +298,7 @@ def _phone_prepare(args: Any, kwargs: Mapping[str, Any], retry_of: str = "") -> 
 
     record = bool(args.get("record", False))
     voicemail = bool(args.get("leave_voicemail", False))
+    inquiry = bool(args.get("inquiry_only", False))
     override = bool(args.get("override_quiet_hours", False))
     default_max = svc.config_int("max_duration_s", briefmod.DEFAULT_MAX_DURATION_S)
     max_duration = briefmod.clamp_duration(args.get("max_duration_s", default_max), default_max)
@@ -321,7 +322,7 @@ def _phone_prepare(args: Any, kwargs: Mapping[str, Any], retry_of: str = "") -> 
         callee_name=callee, number=e164, number_source=source, goal=goal, facts=facts,
         sensitive_requested=requested, granted=set(), user_name=user_name,
         max_duration_s=max_duration, record=record, leave_voicemail=voicemail,
-        language=language, quiet_hours_override=override,
+        language=language, quiet_hours_override=override, inquiry_only=inquiry,
         question_timeout_s=svc.config_int("question_timeout_s",
                                           briefmod.DEFAULT_QUESTION_TIMEOUT_S))
     if svc.mode == "remote":  # cost comes from the bridge's usage only, never plugin defaults
@@ -557,6 +558,10 @@ SCHEMAS: dict[str, dict] = {
             "max_duration_s": {"type": "integer", "default": 300},
             "record": {"type": "boolean", "default": False},
             "leave_voicemail": {"type": "boolean", "default": False},
+            "inquiry_only": {
+                "type": "boolean", "default": False,
+                "description": "Ask and listen only: the voice agent books, accepts and agrees "
+                               "to nothing (used by the call playbooks)"},
             "override_quiet_hours": {
                 "type": "boolean", "default": False,
                 "description": "Shown on the approval card; only use if the user asked for a "

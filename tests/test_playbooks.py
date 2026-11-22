@@ -7,8 +7,10 @@ import stat
 import pytest
 from conftest import TEST_NUMBER
 
+from hermes_phone import brief as briefmod
 from hermes_phone import commands, states, tools
 from hermes_phone import playbooks as pb
+from hermes_phone.bridge import business, realtime
 
 
 @pytest.fixture
@@ -123,6 +125,35 @@ def test_playbook_args_go_through_the_approval_card_and_dial_only_on_approval(sl
     assert "error" in refused and dialer.calls == []
     commands.phone_command(f"approve {out['call_id']} confirm", user_id="u1", session_id="s1")
     assert len(dialer.calls) == 1
+    # the voice agent gets the inquiry-only rules, never the booking/negotiation rules
+    call = tools.get_service().store.get_call(out["call_id"])
+    payload = briefmod.voice_payload(call, set())
+    assert payload["inquiry_only"] is True
+    for hold in (True, False):
+        text = realtime.build_instructions(payload, hold)
+        assert "INQUIRY ONLY" in text
+        assert "ACCEPT any offer" not in text and "NEGOTIATE" not in text
+        assert "pencil it in" not in text and "confirm the key details" not in text
+    assert "Inquiry only" in business.rules_text("Test Owner", True)
+    assert "Negotiate" not in business.rules_text("Test Owner", True)
+
+
+def test_ordinary_calls_keep_the_booking_rules():
+    payload = {"callee_name": "X", "user_name": "Test Owner", "goal": "book", "opening_line": "",
+               "facts": {}}
+    assert "ACCEPT any offer" in realtime.build_instructions(payload, True)
+    assert "NEGOTIATE" in realtime.build_instructions(payload, False)
+    assert "INQUIRY ONLY" not in realtime.build_instructions(payload, True)
+
+
+def test_a_corrected_answer_reopens_the_office(home):
+    pb.opt_in(pb.NEW_PATIENT, "yes", home)
+    eid = pb.plan_new_patient(DOCS, "Example PPO", "Test Owner", home)["entries"][0]["entry_id"]
+    pb.log_answer(pb.NEW_PATIENT, eid, "c1", "yes", "yes", "", home)
+    pb.log_answer(pb.NEW_PATIENT, eid, "c2", "unknown", "unknown", "correction", home)
+    assert pb.summary(pb.NEW_PATIENT, home)["answers"][0]["answer"] == "unknown"
+    again = pb.plan_new_patient(DOCS, "Example PPO", "Test Owner", home)
+    assert [e["entry_id"] for e in again["entries"]] == [eid] and again["skipped"] == []
 
 
 def test_cli_status_and_error_exit(home, monkeypatch, capsys):

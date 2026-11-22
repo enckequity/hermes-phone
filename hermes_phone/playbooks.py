@@ -178,6 +178,7 @@ def new_patient_args(doctor: dict, plan: str, on_behalf_of: str) -> dict:
         "max_duration_s": NEW_PATIENT_MAX_S,
         "record": False,
         "leave_voicemail": False,
+        "inquiry_only": True,
     }
 
 
@@ -189,8 +190,9 @@ def plan_new_patient(doctors: Iterable[dict], plan: str, on_behalf_of: str,
         raise PlaybookError("the in-network list is empty")
     if len(doctors) > MAX_BATCH:
         raise PlaybookError(f"at most {MAX_BATCH} offices per list; split it")
-    done = {r.get("entry_id") for r in read(NEW_PATIENT, environ)
-            if r.get("kind") == "answer" and r.get("answer") in ("yes", "no", "waitlist")}
+    latest = {r.get("entry_id"): r.get("answer") for r in read(NEW_PATIENT, environ)
+              if r.get("kind") == "answer"}  # the last answer wins, as in summary()
+    done = {eid for eid, ans in latest.items() if ans in ("yes", "no", "waitlist")}
     entries, skipped = [], []
     for doc in doctors:
         args = new_patient_args(doc, plan, on_behalf_of)
@@ -242,6 +244,7 @@ def hold_wait_args(number: str, callee: str, reach: str, reason: str, on_behalf_
         "max_duration_s": HOLD_MAX_S,
         "record": False,
         "leave_voicemail": False,
+        "inquiry_only": True,
     }
 
 

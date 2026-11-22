@@ -315,7 +315,8 @@ def _cmd_retry(rest: list[str], kwargs: dict) -> str:
             "language": brief.get("language", "en"), "max_duration_s": lim.get("max_duration_s"),
             "record": bool(lim.get("recording")),
             "leave_voicemail": bool(lim.get("voicemail_message")),
-            "override_quiet_hours": bool(brief.get("quiet_hours_override"))}
+            "override_quiet_hours": bool(brief.get("quiet_hours_override")),
+            "inquiry_only": bool(brief.get("inquiry_only"))}
     data = json.loads(tools._phone_prepare_safe(args, kwargs, retry_of=old["id"]))
     if "error" in data:
         return f"Could not prepare the retry: {data['error']}"
